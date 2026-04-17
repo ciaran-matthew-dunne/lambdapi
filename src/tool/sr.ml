@@ -171,9 +171,12 @@ let check_rule : Pos.popt -> sym_rule -> sym_rule =
   if not (Unif.solve_noexn p) then
     fatal pos "The rewriting rule does not preserve typing.";
   let rhs_constrs = List.map norm_constr !p.unsolved in
-  (* [matches p t] says if [t] is an instance of [p]. *)
+  (* [matches p t] says if [t] is an instance of [p].
+     Symbols in [map] that stand for pattern variables are treated as
+     wildcards (like Vari). We track their bindings in a separate map
+     keyed by symbol. *)
   let matches p t =
-    let rec matches s l =
+    let rec matches vs ss l =
       match l with
       | [] -> ()
       | (p,t)::l ->
@@ -181,15 +184,29 @@ let check_rule : Pos.popt -> sym_rule -> sym_rule =
           log_subj "matches [%a] [%a]" term p term t;*)
         match unfold p, unfold t with
         | Vari x, _ ->
-          begin match VarMap.find_opt x s with
+          begin match VarMap.find_opt x vs with
             | Some u ->
-              if Eval.eq_modulo [] t u then matches s l else raise Exit
-            | None -> matches (VarMap.add x t s) l
+              if Eval.eq_modulo [] t u then matches vs ss l else raise Exit
+            | None -> matches (VarMap.add x t vs) ss l
           end
-        | Symb f, Symb g when f == g -> matches s l
-        | Appl(t1,u1), Appl(t2,u2) -> matches s ((t1,t2)::(u1,u2)::l)
-        | _ -> raise Exit
-    in try matches VarMap.empty [p,t]; true with Exit -> false
+        | Symb f, _ when SymMap.mem f Stdlib.(!map) ->
+          begin match SymMap.find_opt f ss with
+            | Some u ->
+              if Eval.eq_modulo [] t u then matches vs ss l else raise Exit
+            | None -> matches vs (SymMap.add f t ss) l
+          end
+        | Symb f, Symb g when f == g -> matches vs ss l
+        | Appl(t1,u1), Appl(t2,u2) -> matches vs ss ((t1,t2)::(u1,u2)::l)
+        | Abst(a1,b1), Abst(a2,b2)
+        | Prod(a1,b1), Prod(a2,b2) ->
+          let (x, t1) = unbind b1 in
+          let t2 = subst b2 (mk_Vari x) in
+          matches vs ss ((a1,a2)::(t1,t2)::l)
+        | _ ->
+          (* Fall back to eq_modulo for terms that don't decompose
+             structurally (e.g. after rewriting). *)
+          if Eval.eq_modulo [] p t then matches vs ss l else raise Exit
+    in try matches VarMap.empty SymMap.empty [p,t]; true with Exit -> false
   in
   (* Function saying if a constraint is an instance of another one. *)
   let is_inst ((_c1,t1,u1) as x1) ((_c2,t2,u2) as x2) =
@@ -198,7 +215,22 @@ let check_rule : Pos.popt -> sym_rule -> sym_rule =
     let cons t u = add_args (mk_Symb Unif_rule.equiv) [t; u] in
     matches (cons t1 u1) (cons t2 u2) || matches (cons t1 u1) (cons u2 t2)
   in
-  let is_lhs_constr rc = List.exists (fun lc -> is_inst lc rc) lhs_constrs in
+  (* A constraint that mentions pattern-variable symbols is a conditional
+     constraint: it will hold for any substitution of the pattern variables
+     that satisfies the LHS typing. Such constraints are not SR violations. *)
+  let has_pvar_sym =
+    let rec has t =
+      match unfold t with
+      | Symb f -> SymMap.mem f Stdlib.(!map)
+      | Appl(a,b) -> has a || has b
+      | Abst(_,b) | Prod(_,b) -> let (_,t) = unbind b in has t
+      | _ -> false
+    in has
+  in
+  let is_pvar_constr (_,t,u) = has_pvar_sym t || has_pvar_sym u in
+  let is_lhs_constr rc =
+    is_pvar_constr rc
+    || List.exists (fun lc -> is_inst lc rc) lhs_constrs in
   let cs = List.filter (fun rc -> not (is_lhs_constr rc)) rhs_constrs in
   if cs <> [] then
     begin
