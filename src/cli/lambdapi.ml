@@ -122,7 +122,7 @@ let check_cmd : Config.t -> int option -> string list -> unit =
     Config.init cfg;
     (* We save time to run each file in the same environment. *)
     let time = Time.save () in
-    let handle file =
+    let check_one file =
       Console.reset_default ();
       Time.restore time;
       let sign =
@@ -145,7 +145,45 @@ let check_cmd : Config.t -> int option -> string list -> unit =
       run_checker "confluence" Export.Hrs.sign cfg.confluence "confluent";
       run_checker "termination" Export.Xtc.sign cfg.termination "terminating"
     in
-    List.iter handle files
+    if cfg.json then begin
+      (* JSON mode: catch [Fatal] per-file so one failure doesn't sink
+         the rest of the batch — the whole point of structured output is
+         letting the consumer see every file's result. The exit code
+         still turns non-zero if any file failed, preserving the CI
+         contract. Non-[Fatal] exceptions are left to propagate to
+         [Error.handle_exceptions]: those are crashes, not typechecking
+         failures, and stopping hard is the right call. *)
+      let t_batch = Sys.time () in
+      let ok = Stdlib.ref 0 in
+      let failed = Stdlib.ref 0 in
+      let check_one_json file =
+        Json_out.file_start ~file;
+        let t0 = Sys.time () in
+        let status =
+          try check_one file; `Ok with Fatal(popt, msg) ->
+            let pos = match popt with None -> None | Some p -> p in
+            Json_out.diagnostic ~severity:`Error pos msg;
+            `Error
+        in
+        let elapsed_ms =
+          int_of_float ((Sys.time () -. t0) *. 1000.) in
+        Json_out.file_end ~file ~status ~elapsed_ms;
+        match status with
+        | `Ok -> Stdlib.incr ok
+        | `Error -> Stdlib.incr failed
+      in
+      List.iter check_one_json files;
+      let elapsed_ms =
+        int_of_float ((Sys.time () -. t_batch) *. 1000.) in
+      let ok_n = Stdlib.(!ok) and failed_n = Stdlib.(!failed) in
+      Json_out.summary
+        ~files_checked:(ok_n + failed_n)
+        ~files_ok:ok_n
+        ~files_failed:failed_n
+        ~elapsed_ms;
+      if failed_n > 0 then exit 1
+    end else
+      List.iter check_one files
   in
   Error.handle_exceptions run
 
@@ -457,6 +495,13 @@ let version_cmd =
   let doc = "Display the current version of Lambdapi." in
   Cmd.v (Cmd.info "version" ~doc) CLT.(const run $ const ())
 
+let json_schema_version_cmd =
+  (* Prints the schema version on stdout and nothing else. Clients use
+     this to negotiate/validate before invoking [check --json] proper. *)
+  let run () = print_endline Json_out.schema_version in
+  let doc = "Print the schema version used by --json output." in
+  Cmd.v (Cmd.info "json-schema-version" ~doc) CLT.(const run $ const ())
+
 let query_as_arg : string Cmdliner.Term.t =
   let doc = "Query to be executed." in
   Arg.(required & pos 0 (some string) None & info [] ~docv:"QUERY" ~doc)
@@ -524,6 +569,7 @@ let _ =
   let cmds =
     [ check_cmd ; parse_cmd ; export_cmd ; lsp_server_cmd
     ; decision_tree_cmd ; help_cmd ; version_cmd
+    ; json_schema_version_cmd
     ; Init.cmd ; Install.install_cmd ; Install.uninstall_cmd
     ; index_cmd ; search_cmd ; websearch_cmd ]
   in
