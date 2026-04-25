@@ -20,7 +20,8 @@ let capabilities : J.t =
   ; "supportsTerminateRequest",              `Bool true
   ; "supportsSingleThreadExecutionRequests", `Bool true
   ; "supportsCancelRequest",                 `Bool false
-  ; "supportsStepBack",                      `Bool false
+  ; "supportsStepBack",                      `Bool true
+  ; "supportsRestartFrame",                  `Bool true
   ; "supportsRestartRequest",                `Bool false
   ; "supportsExceptionInfoRequest",          `Bool false
   ; "supportsValueFormattingOptions",        `Bool false
@@ -36,7 +37,9 @@ let capabilities : J.t =
 *)
 
 let goals_scope_ref      = 1
+let unif_scope_ref       = 2
 let goal_hyps_ref_base   = 100
+let unif_hyps_ref_base   = 200
 
 (* --- Breakpoint snapping -------------------------------------------- *)
 
@@ -108,27 +111,51 @@ let stack_frame_of_pause (paused : State.paused_at) : J.t =
   ; "presentationHint", `String "normal"
   ]
 
-let scopes_body (paused : State.paused_at) : J.t =
-  let n = List.length paused.snapshot.goals in
-  `Assoc ["scopes", `List [
-    `Assoc [
-      "name",               `String "Goals"
-    ; "variablesReference", `Int goals_scope_ref
-    ; "namedVariables",     `Int n
-    ; "expensive",           `Bool false
-    ; "presentationHint",   `String "locals"
-    ]]]
+(** Partition a goal list into [(typ_goals, unif_goals)] preserving
+    relative order — typing goals end up under the [Goals] scope,
+    unification constraints under [Constraints]. *)
+let split_goals (gs : Handle.Dap_hooks.goal_snapshot list)
+  : Handle.Dap_hooks.goal_snapshot list * Handle.Dap_hooks.goal_snapshot list =
+  List.partition (fun g -> g.Handle.Dap_hooks.goal_kind = `Typ) gs
 
-let goal_variable (i : int) (g : Handle.Dap_hooks.goal_snapshot) : J.t =
+let scopes_body (paused : State.paused_at) : J.t =
+  let typs, unifs = split_goals paused.snapshot.goals in
+  let scope name ref_ count =
+    `Assoc [
+      "name",               `String name
+    ; "variablesReference", `Int ref_
+    ; "namedVariables",     `Int count
+    ; "expensive",          `Bool false
+    ; "presentationHint",   `String "locals"
+    ]
+  in
+  let scopes = [scope "Goals" goals_scope_ref (List.length typs)] in
+  let scopes = if unifs = [] then scopes
+               else scopes @ [scope "Constraints" unif_scope_ref (List.length unifs)]
+  in
+  `Assoc ["scopes", `List scopes]
+
+let typ_variable (i : int) (g : Handle.Dap_hooks.goal_snapshot) : J.t =
   let ref_ =
     if g.goal_hyps = [] then 0
     else goal_hyps_ref_base + i
   in
-  let kind = match g.goal_kind with `Typ -> "Typ" | `Unif -> "Unif" in
   `Assoc [
     "name",               `String (Printf.sprintf "goal[%d]" i)
   ; "value",              `String g.goal_label
-  ; "type",               `String kind
+  ; "type",               `String "Typ"
+  ; "variablesReference", `Int ref_
+  ]
+
+let unif_variable (i : int) (g : Handle.Dap_hooks.goal_snapshot) : J.t =
+  let ref_ =
+    if g.goal_hyps = [] then 0
+    else unif_hyps_ref_base + i
+  in
+  `Assoc [
+    "name",               `String (Printf.sprintf "constr[%d]" i)
+  ; "value",              `String g.goal_label
+  ; "type",               `String "Unif"
   ; "variablesReference", `Int ref_
   ]
 
@@ -140,18 +167,46 @@ let hyp_variable ((name, ty) : string * string) : J.t =
   ]
 
 let variables_body (paused : State.paused_at) (reference : int) : J.t =
+  let typs, unifs = split_goals paused.snapshot.goals in
   let vars : J.t list =
     if reference = goals_scope_ref then
-      List.mapi goal_variable paused.snapshot.goals
+      List.mapi typ_variable typs
+    else if reference = unif_scope_ref then
+      List.mapi unif_variable unifs
     else if reference >= goal_hyps_ref_base
-         && reference < goal_hyps_ref_base + List.length paused.snapshot.goals
-    then
-      let i = reference - goal_hyps_ref_base in
-      let g = List.nth paused.snapshot.goals i in
-      List.map hyp_variable g.goal_hyps
+         && reference < goal_hyps_ref_base + List.length typs
+    then List.map hyp_variable
+           (List.nth typs (reference - goal_hyps_ref_base)).goal_hyps
+    else if reference >= unif_hyps_ref_base
+         && reference < unif_hyps_ref_base + List.length unifs
+    then List.map hyp_variable
+           (List.nth unifs (reference - unif_hyps_ref_base)).goal_hyps
     else []
   in
   `Assoc ["variables", `List vars]
+
+(* --- Output redirection --------------------------------------------- *)
+
+(** Build a [Format.formatter] that buffers writes and emits one DAP
+    [output] event per flush. Used to redirect [Common.Error.err_fmt]
+    and [Common.Console.out_fmt] so kernel debug traces / warnings /
+    [print]-from-tactic output land in the editor's Debug Console
+    instead of being silently written to the adapter's stderr. *)
+let make_output_formatter ~(category : string) : Format.formatter =
+  let buf = Buffer.create 256 in
+  let out s pos len = Buffer.add_substring buf s pos len in
+  let flush () =
+    let s = Buffer.contents buf in
+    Buffer.clear buf;
+    if s <> "" then
+      Io.send (Msg.event ~event:"output"
+                 ~body:(`Assoc [
+                   "category", `String category
+                 ; "output",   `String s
+                 ])
+                 ())
+  in
+  Format.make_formatter out flush
 
 (* --- Kernel thread -------------------------------------------------- *)
 
@@ -159,6 +214,14 @@ let kernel_thread (s : State.t) (path : string) : unit =
   let exit_code, term_msg =
     try
       Common.Console.reset_default ();
+      (* Disable ANSI colors — escape sequences in the Debug Console
+         render as garbage. *)
+      Lplib.Color.color := false;
+      Common.Error.err_fmt   := make_output_formatter ~category:"stderr";
+      Common.Console.out_fmt := make_output_formatter ~category:"stdout";
+      (* Apply [launch.debug] if requested. *)
+      let dbg = State.with_lock s (fun () -> s.debug_flags) in
+      if dbg <> "" then Common.Logger.set_debug true dbg;
       Pause.install s;
       let _sign = Handle.Compile.compile_file path in
       (0, None)
@@ -175,7 +238,7 @@ let kernel_thread (s : State.t) (path : string) : unit =
   in
   Handle.Dap_hooks.clear_callbacks ();
   State.with_lock s (fun () -> s.status <- State.Terminated;
-    Condition.broadcast s.run_cv);
+    Condition.broadcast s.wakeup_cv);
   (match term_msg with
    | None -> ()
    | Some m ->
@@ -213,12 +276,26 @@ let error_reply ~(seq : int) ~(command : string) ~(message : string)
     (Msg.response ~request_seq:seq ~command ~success:false ~message
        ?body ())
 
-(** [release_kernel s mode] must be called with [s.m] held. Switches
-    [step_mode], flips status to [Running], and broadcasts. *)
+(** [release_kernel s mode] must be called with [s.m] held. Sets
+    [step_mode], flips status to [Running], and tells the kernel to
+    [Resume]. *)
 let release_kernel (s : State.t) (mode : State.step_mode) : unit =
-  s.step_mode <- mode;
-  s.status <- State.Running;
-  Condition.broadcast s.run_cv
+  s.step_mode   <- mode;
+  s.status      <- State.Running;
+  s.next_action <- Some State.Resume;
+  Condition.broadcast s.wakeup_cv
+
+(** Push a [Rewind] action and wake the kernel. The kernel replays
+    silently up to [target]; we set [step_mode = Step] so the
+    *first* hook firing after replay pauses (not the next breakpoint).
+    That matches the DAP intent: [stepBack]/[restartFrame] should
+    leave the user paused exactly at the rewind target, regardless of
+    where bps are set. *)
+let request_rewind (s : State.t) ~(target : int) : unit =
+  s.step_mode   <- State.Step;
+  s.status      <- State.Running;
+  s.next_action <- Some (State.Rewind target);
+  Condition.broadcast s.wakeup_cv
 
 let handle_request (s : State.t) (req : J.t) : bool =
   let seq     = Msg.field_int req "seq" in
@@ -239,6 +316,7 @@ let handle_request (s : State.t) (req : J.t) : bool =
   | "launch" ->
       let path = Msg.field_string args "program" in
       let stop_on_entry = Msg.field_bool ~default:true args "stopOnEntry" in
+      let debug_flags = Msg.field_string args "debug" in
       if path = "" then begin
         error_reply ~seq ~command
           ~message:"missing 'program'"
@@ -248,6 +326,7 @@ let handle_request (s : State.t) (req : J.t) : bool =
         State.with_lock s (fun () ->
           s.launch_path   <- Some (State.normalise_path path);
           s.stop_on_entry <- stop_on_entry;
+          s.debug_flags   <- debug_flags;
           s.step_mode     <- Continue);
         Io.send (Msg.response ~request_seq:seq ~command ());
         true
@@ -360,11 +439,57 @@ let handle_request (s : State.t) (req : J.t) : bool =
         | _ -> ());
       Io.send (Msg.response ~request_seq:seq ~command ());
       true
+  | "evaluate" ->
+      let expr = Msg.field_string args "expression" in
+      let reply (out : State.eval_outcome) =
+        let success, body =
+          match out with
+          | State.Eval_ok r ->
+              true,
+              `Assoc [
+                "result",             `String r
+              ; "variablesReference", `Int 0
+              ]
+          | State.Eval_err msg ->
+              false,
+              `Assoc [
+                "result",             `String msg
+              ; "variablesReference", `Int 0
+              ]
+        in
+        Io.send (Msg.response ~request_seq:seq ~command ~success ~body ())
+      in
+      let queued =
+        State.with_lock s (fun () ->
+          match s.status with
+          | Paused _ ->
+              s.next_action <- Some (State.Eval (expr, reply));
+              Condition.broadcast s.wakeup_cv;
+              true
+          | _ -> false)
+      in
+      if not queued then reply (State.Eval_err "evaluate: not paused");
+      true
+  | "stepBack" ->
+      State.with_lock s (fun () ->
+        match s.status with
+        | Paused p -> request_rewind s ~target:(max 0 (p.index - 1))
+        | _ -> ());
+      Io.send (Msg.response ~request_seq:seq ~command ());
+      true
+  | "restartFrame" ->
+      State.with_lock s (fun () ->
+        match s.status with
+        | Paused _ -> request_rewind s ~target:0
+        | _ -> ());
+      Io.send (Msg.response ~request_seq:seq ~command ());
+      true
   | "terminate"
   | "disconnect" ->
       State.with_lock s (fun () ->
         s.status <- State.Terminated;
-        Condition.broadcast s.run_cv);
+        s.next_action <- Some State.Resume;
+        Condition.broadcast s.wakeup_cv);
       Io.send (Msg.response ~request_seq:seq ~command ());
       false  (* Stop the read loop. *)
   | other ->

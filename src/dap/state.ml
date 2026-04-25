@@ -22,6 +22,24 @@ type step_mode =
   | Step                (** Pause at the next [before_tactic] boundary. *)
   | Step_out            (** Pause at the [after_proof] boundary. *)
 
+(** A request from the I/O thread to the kernel thread. The kernel
+    consumes one of these on each wake-up while paused.
+
+    - [Resume]: leave [Paused], let [pause_kernel] return.
+    - [Eval (expr, reply)]: parse [expr] as a query, run it against the
+      live [ss]/[ps], hand the result back via [reply], remain paused.
+    - [Rewind k]: raise [Dap_hooks.Rewind_to k] from the pause site so
+      the kernel's [Command.handle] catches it and replays the proof
+      from index 0 up to [k]. *)
+type kernel_action =
+  | Resume
+  | Eval of string * (eval_outcome -> unit)
+  | Rewind of int
+
+and eval_outcome =
+  | Eval_ok of string
+  | Eval_err of string
+
 type status =
   | Idle                (** Adapter started, no [launch] yet. *)
   | Configuring         (** [initialize] received, awaiting [configurationDone]. *)
@@ -33,30 +51,40 @@ and paused_at =
   { reason   : string                      (** [entry|step|breakpoint|exception]. *)
   ; pos      : H.tactic_pos
   ; snapshot : H.proof_snapshot
-  ; error    : string option }
+  ; error    : string option
+  ; index    : int      (** Tactic index at the pause site (-1 = before_proof). *)
+  ; live_ss  : Core.Sig_state.t option     (** Available outside [before_proof]. *)
+  ; live_ps  : Handle.Proof.proof_state option }
 
 (** Per-source-file breakpoint set: 1-based line numbers. *)
 type breakpoints = (string, int list) Hashtbl.t
 
 type t =
-  { mutable status      : status
-  ; mutable step_mode   : step_mode
-  ; mutable breakpoints : breakpoints
-  ; mutable launch_path : string option
+  { mutable status        : status
+  ; mutable step_mode     : step_mode
+  ; mutable breakpoints   : breakpoints
+  ; mutable launch_path   : string option
   ; mutable stop_on_entry : bool
-  ; m       : Mutex.t
-  ; run_cv  : Condition.t
-        (** Kernel waits on this when paused; main signals it. *)
+  ; mutable debug_flags   : string
+        (** Logger flags requested via [launch.debug] (e.g. ["iut"]). *)
+  ; mutable next_action   : kernel_action option
+        (** Set by main thread, drained by kernel on each [wakeup_cv] wake. *)
+  ; m           : Mutex.t
+  ; wakeup_cv   : Condition.t
+        (** Kernel waits on this when paused; main signals it for both
+            control (continue/next/...) and request (eval/rewind). *)
   }
 
 let create () : t =
-  { status      = Idle
-  ; step_mode   = Continue
-  ; breakpoints = Hashtbl.create 8
-  ; launch_path = None
+  { status        = Idle
+  ; step_mode     = Continue
+  ; breakpoints   = Hashtbl.create 8
+  ; launch_path   = None
   ; stop_on_entry = true
-  ; m           = Mutex.create ()
-  ; run_cv      = Condition.create () }
+  ; debug_flags   = ""
+  ; next_action   = None
+  ; m             = Mutex.create ()
+  ; wakeup_cv     = Condition.create () }
 
 let with_lock (s : t) (f : unit -> 'a) : 'a =
   Mutex.lock s.m;

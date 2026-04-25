@@ -639,37 +639,66 @@ let handle : compiler -> Sig_state.t -> Syntax.p_command -> Sig_state.t =
   | None -> ss
   | Some d ->
     let raw_handler = Tactic.handle ss d.pdata_sym_pos d.pdata_prv in
-    let handler =
-      if not (Dap_hooks.is_active ()) then raw_handler
-      else fun ((ps, _) as acc) tac n_sub ->
-        let bt_pos = Dap_hooks.tactic_pos_of_popt tac.pos in
-        let bt_state = Dap_hooks.snapshot_of_proof_state ps in
-        Dap_hooks.before_tactic
-          { bt_pos; bt_state; bt_subgoals = n_sub };
-        match raw_handler acc tac n_sub with
-        | exception (Fatal (_, msg) as e) ->
-            Dap_hooks.after_tactic
-              { at_pos = bt_pos; at_state = bt_state
-              ; at_error = Some msg };
-            raise e
-        | (ps', _) as out ->
-            Dap_hooks.after_tactic
-              { at_pos = bt_pos
-              ; at_state = Dap_hooks.snapshot_of_proof_state ps'
-              ; at_error = None };
-            out
+    let ps =
+      if not (Dap_hooks.is_active ()) then
+        fst (fold_proof raw_handler (d.pdata_state, None) d.pdata_proof)
+      else begin
+        (* DAP active: wrap fold_proof in a replay loop so [stepBack]
+           and [restartFrame] work. We capture the kernel's [Time]
+           before any tactic runs; on a [Rewind_to k] exception (raised
+           from inside [before_tactic]) we restore that time, reset
+           the index, and re-fold — running tactics 0..k-1 silently
+           before resuming hook firing at tactic [k]. *)
+        let initial_time = Timed.Time.save () in
+        (* Counters MUST be Stdlib.refs — Time.restore would otherwise
+           roll [i] / [replay_target] back along with kernel state,
+           breaking the replay loop. *)
+        let i : int Stdlib.ref = Stdlib.ref 0 in
+        let replay_target : int Stdlib.ref = Stdlib.ref 0 in
+        let handler ((ps, _) as acc) tac n_sub =
+          let current = Stdlib.(!i) in
+          Stdlib.(i := current + 1);
+          if current < Stdlib.(!replay_target) then raw_handler acc tac n_sub
+          else begin
+            let bt_pos = Dap_hooks.tactic_pos_of_popt tac.pos in
+            let bt_state = Dap_hooks.snapshot_of_proof_state ps in
+            Dap_hooks.before_tactic
+              { bt_pos; bt_state; bt_subgoals = n_sub
+              ; bt_index = current; bt_ss = ss; bt_ps = ps };
+            match raw_handler acc tac n_sub with
+            | exception (Fatal (_, msg) as e) ->
+                Dap_hooks.after_tactic
+                  { at_pos = bt_pos; at_state = bt_state
+                  ; at_error = Some msg };
+                raise e
+            | (ps', _) as out ->
+                Dap_hooks.after_tactic
+                  { at_pos = bt_pos
+                  ; at_state = Dap_hooks.snapshot_of_proof_state ps'
+                  ; at_error = None };
+                out
+          end
+        in
+        Dap_hooks.before_proof
+          { bp_name  = d.pdata_state.proof_name.elt
+          ; bp_pos   = Dap_hooks.tactic_pos_of_popt d.pdata_sym_pos
+          ; bp_state = Dap_hooks.snapshot_of_proof_state d.pdata_state
+          ; bp_ss    = ss
+          ; bp_ps    = d.pdata_state };
+        let rec attempt () =
+          Timed.Time.restore initial_time;
+          Stdlib.(i := 0);
+          try fold_proof handler (d.pdata_state, None) d.pdata_proof
+          with Dap_hooks.Rewind_to k ->
+            Stdlib.(replay_target := max 0 k);
+            attempt ()
+        in
+        let ps, _ = attempt () in
+        Dap_hooks.after_proof
+          { ap_name = d.pdata_state.proof_name.elt
+          ; ap_pos  = Dap_hooks.tactic_pos_of_popt d.pdata_end_pos
+          ; ap_open_goals = List.length ps.proof_goals };
+        ps
+      end
     in
-    if Dap_hooks.is_active () then
-      Dap_hooks.before_proof
-        { bp_name  = d.pdata_state.proof_name.elt
-        ; bp_pos   = Dap_hooks.tactic_pos_of_popt d.pdata_sym_pos
-        ; bp_state = Dap_hooks.snapshot_of_proof_state d.pdata_state };
-    let ps, _ =
-      fold_proof handler (d.pdata_state, None) d.pdata_proof
-    in
-    if Dap_hooks.is_active () then
-      Dap_hooks.after_proof
-        { ap_name = d.pdata_state.proof_name.elt
-        ; ap_pos  = Dap_hooks.tactic_pos_of_popt d.pdata_end_pos
-        ; ap_open_goals = List.length ps.proof_goals };
     d.pdata_finalize ss ps

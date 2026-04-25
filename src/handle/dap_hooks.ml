@@ -67,7 +67,10 @@ type proof_snapshot =
 type before_tactic_event =
   { bt_pos      : tactic_pos
   ; bt_state    : proof_snapshot
-  ; bt_subgoals : int  (** Number of subproofs declared after this tac. *) }
+  ; bt_subgoals : int  (** Number of subproofs declared after this tac. *)
+  ; bt_index    : int  (** 0-based index of this tactic in the proof. *)
+  ; bt_ss       : Core.Sig_state.t
+  ; bt_ps       : Proof.proof_state }
 
 type after_tactic_event =
   { at_pos   : tactic_pos
@@ -77,12 +80,23 @@ type after_tactic_event =
 type before_proof_event =
   { bp_name  : string
   ; bp_pos   : tactic_pos
-  ; bp_state : proof_snapshot }
+  ; bp_state : proof_snapshot
+  ; bp_ss    : Core.Sig_state.t
+  ; bp_ps    : Proof.proof_state }
 
 type after_proof_event =
   { ap_name : string
   ; ap_pos  : tactic_pos
   ; ap_open_goals : int  (** Non-zero when the proof was [admitted]. *) }
+
+(** Raised by a hook callback to ask the kernel to rewind execution
+    of the current proof to tactic index [k] (0-based). [k = 0] means
+    rewind to the start of the proof; [k = n - 1] means re-pause at
+    the previously-executed tactic. The caller side
+    ([Command.handle]) catches this exception, restores
+    [Timed.Time.save] to the proof's start, replays tactics 0..k-1
+    silently, then resumes normal hook firing at tactic [k]. *)
+exception Rewind_to of int
 
 type callbacks =
   { before_proof  : before_proof_event  -> unit
