@@ -245,6 +245,15 @@ let lsp_server_cmd : Config.t -> bool -> string -> unit =
   in
   Error.handle_exceptions run
 
+(** Running the DAP server. *)
+let dap_server_cmd : Config.t -> unit =
+    fun cfg ->
+  let run _ =
+    Config.init cfg;
+    Dap.Server.main ()
+  in
+  Error.handle_exceptions run
+
 (** Printing a decision tree. *)
 let decision_tree_cmd : Config.t -> qident -> bool -> unit =
   fun cfg (mp, sym) ghost ->
@@ -486,6 +495,11 @@ let lsp_server_cmd =
   Cmd.v (Cmd.info "lsp" ~doc ~man:man_pkg_file)
     CLT.(const lsp_server_cmd $ Config.full $ standard_lsp $ lsp_log_file)
 
+let dap_server_cmd =
+  let doc = "Runs the Debug Adapter Protocol server (proof debugger)." in
+  Cmd.v (Cmd.info "dap" ~doc ~man:man_pkg_file)
+    CLT.(const dap_server_cmd $ Config.full)
+
 let help_cmd =
   let doc = "Display the main help page for Lambdapi." in
   Cmd.v (Cmd.info "help" ~doc) CLT.(ret (const (`Help (`Pager, None))))
@@ -567,7 +581,7 @@ let _ =
   Stdlib.at_exit (Debug.print_time t0);
   Printexc.record_backtrace true;
   let cmds =
-    [ check_cmd ; parse_cmd ; export_cmd ; lsp_server_cmd
+    [ check_cmd ; parse_cmd ; export_cmd ; lsp_server_cmd ; dap_server_cmd
     ; decision_tree_cmd ; help_cmd ; version_cmd
     ; json_schema_version_cmd
     ; Init.cmd ; Install.install_cmd ; Install.uninstall_cmd

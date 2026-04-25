@@ -3,6 +3,6 @@
  (public_name lambdapi)
  (modes byte native)
  (modules :standard)
- (libraries cmdliner lambdapi.lsp lambdapi.tool lambdapi.handle
-            lambdapi.export unix)           
+ (libraries cmdliner lambdapi.lsp lambdapi.dap lambdapi.tool lambdapi.handle
+            lambdapi.export unix)
 )

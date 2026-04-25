@@ -1,0 +1,6 @@
+(library
+ (name dap)
+ (public_name lambdapi.dap)
+ (modules io msg state pause server)
+ (libraries unix yojson threads.posix lambdapi.common lambdapi.handle
+            lambdapi.parsing))

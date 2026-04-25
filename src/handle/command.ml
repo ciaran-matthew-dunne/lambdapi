@@ -638,7 +638,38 @@ let handle : compiler -> Sig_state.t -> Syntax.p_command -> Sig_state.t =
   match p with
   | None -> ss
   | Some d ->
+    let raw_handler = Tactic.handle ss d.pdata_sym_pos d.pdata_prv in
+    let handler =
+      if not (Dap_hooks.is_active ()) then raw_handler
+      else fun ((ps, _) as acc) tac n_sub ->
+        let bt_pos = Dap_hooks.tactic_pos_of_popt tac.pos in
+        let bt_state = Dap_hooks.snapshot_of_proof_state ps in
+        Dap_hooks.before_tactic
+          { bt_pos; bt_state; bt_subgoals = n_sub };
+        match raw_handler acc tac n_sub with
+        | exception (Fatal (_, msg) as e) ->
+            Dap_hooks.after_tactic
+              { at_pos = bt_pos; at_state = bt_state
+              ; at_error = Some msg };
+            raise e
+        | (ps', _) as out ->
+            Dap_hooks.after_tactic
+              { at_pos = bt_pos
+              ; at_state = Dap_hooks.snapshot_of_proof_state ps'
+              ; at_error = None };
+            out
+    in
+    if Dap_hooks.is_active () then
+      Dap_hooks.before_proof
+        { bp_name  = d.pdata_state.proof_name.elt
+        ; bp_pos   = Dap_hooks.tactic_pos_of_popt d.pdata_sym_pos
+        ; bp_state = Dap_hooks.snapshot_of_proof_state d.pdata_state };
     let ps, _ =
-      fold_proof (Tactic.handle ss d.pdata_sym_pos d.pdata_prv)
-        (d.pdata_state, None) d.pdata_proof
-    in d.pdata_finalize ss ps
+      fold_proof handler (d.pdata_state, None) d.pdata_proof
+    in
+    if Dap_hooks.is_active () then
+      Dap_hooks.after_proof
+        { ap_name = d.pdata_state.proof_name.elt
+        ; ap_pos  = Dap_hooks.tactic_pos_of_popt d.pdata_end_pos
+        ; ap_open_goals = List.length ps.proof_goals };
+    d.pdata_finalize ss ps
