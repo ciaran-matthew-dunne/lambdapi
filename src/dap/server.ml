@@ -38,6 +38,46 @@ let capabilities : J.t =
 let goals_scope_ref      = 1
 let goal_hyps_ref_base   = 100
 
+(* --- Breakpoint snapping -------------------------------------------- *)
+
+(** Collect the 1-based start line of every tactic in [path], sorted
+    ascending and deduplicated. Used by [setBreakpoints] to snap a
+    user's requested line to the nearest real tactic — without that,
+    a breakpoint on a comment or blank line silently never fires.
+
+    Parsing only — no scoping, typing, or signature loading. Returns
+    [[]] if the file fails to parse; the kernel will surface the same
+    error at [launch] time, so we don't double-report it here. *)
+let tactic_lines_in_file (path : string) : int list =
+  let acc = ref [] in
+  let visit_proof proof =
+    let _ : unit =
+      Parsing.Syntax.fold_proof
+        (fun () tac _n_sub ->
+          match tac.Common.Pos.pos with
+          | Some p -> acc := p.start_line :: !acc
+          | None -> ())
+        ()
+        proof
+    in
+    ()
+  in
+  let consume (cmd : Parsing.Syntax.p_command) =
+    match cmd.elt with
+    | P_symbol { p_sym_prf = Some (proof, _); _ } -> visit_proof proof
+    | _ -> ()
+  in
+  (try Common.Debug.stream_iter consume (Parsing.Parser.parse_file path)
+   with _ -> ());
+  List.sort_uniq compare !acc
+
+(** Given the (sorted asc) tactic-line list and a single requested
+    breakpoint line, return the line we should actually pause on,
+    or [None] if no tactic exists at or after [requested]. *)
+let snap_one (tac_lines : int list) (requested : int) : int option =
+  try Some (List.find (fun t -> t >= requested) tac_lines)
+  with Not_found -> None
+
 (* --- Helpers -------------------------------------------------------- *)
 
 let kernel_thread_id = Pause.kernel_thread_id
@@ -225,19 +265,33 @@ let handle_request (s : State.t) (req : J.t) : bool =
         | Some src -> Msg.field_string src "path"
         | None -> ""
       in
-      let bp_lines =
+      let requested =
         match Msg.field args "breakpoints" with
         | Some (`List bps) ->
             List.map (fun bp -> Msg.field_int bp "line") bps
         | _ -> []
       in
-      State.set_breakpoints s ~path ~lines:bp_lines;
+      let tac_lines = tactic_lines_in_file path in
+      let snapped = List.map (snap_one tac_lines) requested in
+      let kernel_lines =
+        List.filter_map (fun x -> x) snapped |> List.sort_uniq compare
+      in
+      State.set_breakpoints s ~path ~lines:kernel_lines;
       let verified =
-        List.map (fun line ->
-          `Assoc [
-            "verified", `Bool true
-          ; "line",     `Int line
-          ]) bp_lines
+        List.map2 (fun req snap ->
+          match snap with
+          | Some line ->
+              `Assoc [
+                "verified", `Bool true
+              ; "line",     `Int line
+              ]
+          | None ->
+              `Assoc [
+                "verified", `Bool false
+              ; "line",     `Int req
+              ; "message",  `String "no tactic at or after this line"
+              ])
+          requested snapped
       in
       Io.send (Msg.response ~request_seq:seq ~command
                  ~body:(`Assoc ["breakpoints", `List verified]) ());

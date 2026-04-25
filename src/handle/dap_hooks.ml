@@ -113,13 +113,31 @@ let before_tactic (e : before_tactic_event) : unit = !installed.before_tactic e
 let after_tactic  (e : after_tactic_event)  : unit = !installed.after_tactic  e
 let after_proof   (e : after_proof_event)   : unit = !installed.after_proof   e
 
+(** [Goal.to_info] formats a hypothesis's body as [": τ nat"] (or
+    [" ≔ value"] when there's a let-binding). DAP renders variables as
+    [name = value], so we want the value sans its leading separator —
+    the [name] cell already implies the colon. Strip [": "] / [" ≔ "]
+    and fall back to the raw text if neither prefix is present. *)
+let trim_hyp_value (s : string) : string =
+  let drop n =
+    if String.length s >= n then String.sub s n (String.length s - n)
+    else s
+  in
+  if String.length s >= 2 && String.sub s 0 2 = ": " then drop 2
+  else if String.length s >= 4 && String.sub s 0 4 = " \xe2\x89\x94 " then
+    (* Three bytes of UTF-8 ≔ (U+2254) plus the trailing space. *)
+    drop 4
+  else s
+
 (** Build a [proof_snapshot] from a raw [Proof.proof_state]. Lives
     here (not in [Proof]) because it depends on [Goal.to_info], which
     already does the work of pretty-printing every hypothesis and
     goal target. *)
 let snapshot_of_proof_state (ps : Proof.proof_state) : proof_snapshot =
+  let trim_hyps = List.map (fun (n, v) -> n, trim_hyp_value v) in
   let one g =
     let hyps, body = Goal.to_info g in
+    let hyps = trim_hyps hyps in
     match body with
     | Goal.Typ (name, ty) ->
         { goal_kind  = `Typ
