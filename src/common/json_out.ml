@@ -2,11 +2,17 @@
 
 module J = Yojson.Basic
 
-let schema_version = "1.0.0"
+let schema_version = "1.1.0"
 
 let enabled : bool Stdlib.ref = Stdlib.ref false
 
 let out_fmt : Format.formatter Stdlib.ref = Stdlib.ref Format.std_formatter
+
+(* Extra JSON fields to attach to the NEXT [diagnostic] (consumed and cleared
+   by it). A site raising a rich diagnostic sets this just before raising, out
+   of band, so the structured payload survives even though the [Fatal] in
+   flight only carries a string. Empty for ordinary errors and warnings. *)
+let diagnostic_extra : (string * J.t) list Stdlib.ref = Stdlib.ref []
 
 (* ISO 8601 UTC timestamp with millisecond resolution (e.g.
    "2026-04-22T12:34:56.789Z"). *)
@@ -48,10 +54,12 @@ let range_of_pos (p : Pos.pos) : J.t =
   ]
 
 let diagnostic ~severity (pos : Pos.popt) (message : string) =
+  let extra = !diagnostic_extra in
+  diagnostic_extra := [];
   let base = [
     "severity", `String (string_of_severity severity);
     "message",  `String message;
-  ] in
+  ] @ extra in
   let fields =
     match pos with
     | None -> base

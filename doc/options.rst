@@ -60,6 +60,8 @@ The commands ``check``, ``decision-tree``, ``export``, ``parse``,
 
 * ``--no-sr-check`` disables subject reduction checking.
 
+* ``--proof-state-on-error`` augments a tactic failure during a proof with the proof state. In text mode this is a rich diagnostic (source excerpt, reason, and the proof state before — and, for subproof-count mismatches, after — the tactic); in ``--json`` mode the state is attached as the structured ``goals_before``/``goals_after`` fields described under :ref:`json-output`.
+
 * ``--timeout=<NUM>`` gives up type-checking after the given number of seconds.  Note that the timeout is reset between each file, and that the parameter of the command is expected to be a natural number.
 
 * ``-v <NUM>``, ``--verbose=<NUM>`` sets the verbosity level to the given natural number (the default value is 1). A value of 0 should not print anything, and the higher values print more and more information.
@@ -109,6 +111,24 @@ Record kinds produced by ``check --json``:
      "range":{"start":{"line":5,"col":17},"end":{"line":5,"col":18}},
      "severity":"error","message":"Syntax error. Expected: ]."}
 
+  With ``--proof-state-on-error`` (see above), a tactic failure additionally
+  carries the proof state as structured fields — ``goals_before`` always, and
+  ``goals_after`` when the failure was detected after the tactic ran (a
+  subproof-count mismatch). Each is a list of goals, a goal being
+  ``{"meta":"?n","hyps":[{"name":..,"type":..}],"concl":..}`` for a typing goal
+  or ``{"hyps":[..],"constr":..}`` for a unification goal. ``message`` stays the
+  bare reason; the ascii excerpt shown in text mode is not emitted (``range``
+  already locates the failure).
+
+  ::
+
+    {"kind":"diagnostic","ts":"...","file":"bench/foo.lp",
+     "range":{"start":{"line":8,"col":2},"end":{"line":8,"col":11}},
+     "severity":"error","message":"Missing subproofs (0 subproofs for 2 subgoals)",
+     "goals_before":[{"meta":"?1","hyps":[],"concl":"Π n:N, π (Q n)"}],
+     "goals_after":[{"meta":"?5","hyps":[],"concl":"π (Q z)"},
+                    {"meta":"?7","hyps":[],"concl":"..."}]}
+
 ``file_end``
   Emitted once per input file when processing completes. ``status`` is
   ``"ok"`` when the file typed cleanly, ``"error"`` when a ``Fatal``
@@ -130,7 +150,7 @@ Record kinds produced by ``check --json``:
 
   ::
 
-    {"kind":"summary","ts":"...","schema_version":"1.0.0",
+    {"kind":"summary","ts":"...","schema_version":"1.1.0",
      "files_checked":3,"files_ok":2,"files_failed":1,"elapsed_ms":847}
 
 **Exit code.** Unchanged from text mode: ``0`` when every file checked
@@ -144,7 +164,7 @@ mode (no ``--json``) remains fail-fast.
 
 **Schema stability.** The set of ``kind`` values and ``severity`` values
 is part of a versioned schema (see ``schema_version`` on the
-``summary`` record). Adding a new kind is a minor-version bump;
+``summary`` record). Adding a new kind or field is a minor-version bump;
 renaming or removing one is a major-version bump. Consumers must ignore
 unknown fields so additive evolution stays backwards-compatible.
 

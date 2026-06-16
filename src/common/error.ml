@@ -8,6 +8,14 @@ let err_fmt = Stdlib.ref Format.err_formatter
 (** [no_warnings] disables warnings when set to [true]. *)
 let no_warnings = Stdlib.ref false
 
+(** [proof_state_on_error], when set to [true], makes a tactic failure raise a
+    rich diagnostic (source excerpt, reason, and the proof state around the
+    step) instead of the bare message. It is an opt-in debugging aid (CLI flag
+    [--proof-state-on-error]), off by default, so that ordinary [check] output
+    stays terse. The actual rendering is done where the proof state is in scope
+    (see {!module:Handle.Tactic}). *)
+let proof_state_on_error = Stdlib.ref false
+
 (** [wrn popt fmt] prints a yellow warning message with [Format] format [fmt].
     Note that the output buffer is flushed by the function, and that output is
     prefixed with the position [popt] if given. A newline is automatically put

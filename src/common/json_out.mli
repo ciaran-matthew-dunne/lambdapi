@@ -25,8 +25,16 @@ val out_fmt : Format.formatter Stdlib.ref
 
 type severity = [`Error | `Warning | `Info]
 
-(** [diagnostic ~severity pos msg] emits a [diagnostic] record. The
-    [file] and [range] fields appear when [pos] carries them. *)
+(** Extra JSON fields to attach to the NEXT {!val:diagnostic} emitted, then
+    cleared. A site raising a rich diagnostic (e.g. a tactic failure under
+    [--proof-state-on-error]) sets this just before raising, so its structured
+    payload reaches the emitter even though the [Fatal] in flight is a bare
+    string. Empty for ordinary errors and warnings. *)
+val diagnostic_extra : (string * Yojson.Basic.t) list Stdlib.ref
+
+(** [diagnostic ~severity pos msg] emits a [diagnostic] record. The [file] and
+    [range] fields appear when [pos] carries them, and any fields staged in
+    {!val:diagnostic_extra} are appended (and the stage cleared). *)
 val diagnostic : severity:severity -> Pos.popt -> string -> unit
 
 (** [file_start ~file] emits a [file_start] record (call just before

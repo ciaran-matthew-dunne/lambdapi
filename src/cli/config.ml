@@ -25,7 +25,8 @@ type config =
   ; confluence  : string option
   ; termination : string option
   ; no_sr_check : bool
-  ; json        : bool }
+  ; json        : bool
+  ; proof_state_on_error : bool }
 
 (** Short synonym of the [config] type. *)
 type t = config
@@ -44,7 +45,8 @@ let default_config =
   ; confluence  = None
   ; termination = None
   ; no_sr_check = false
-  ; json        = false }
+  ; json        = false
+  ; proof_state_on_error = false }
 
 (** [init cfg] runs the necessary initializations according to [cfg]. This has
     to be done prior to any other (non-trivial) task. *)
@@ -67,6 +69,7 @@ let init : config -> unit = fun cfg ->
   Debug.do_record_time := cfg.record_time;
   Handle.Command.too_long := cfg.too_long;
   Handle.Command.sr_check := not cfg.no_sr_check;
+  Error.proof_state_on_error := cfg.proof_state_on_error;
   (* Log some configuration data. *)
   if Logger.log_enabled () then
     begin
@@ -221,19 +224,35 @@ let json : bool CLT.t =
   in
   Arg.(value & flag & info ["json"] ~doc)
 
+let proof_state_on_error : bool CLT.t =
+  let doc =
+    "When a tactic fails while a proof is in progress, report the proof state \
+     around it. In text mode this is a rich diagnostic (a source excerpt at \
+     the failure, the reason, and the proof state before the tactic -- and, \
+     for a subproof-count mismatch detected after the tactic ran, the state \
+     after it); in $(b,--json) mode the state is attached as structured \
+     $(b,goals_before)/$(b,goals_after) fields. Covers essentially every \
+     tactic failure: $(b,fail), a $(b,rewrite) with no matching subterm, \
+     $(b,induction) on a non-inductive goal, an ill-typed $(b,refine) or \
+     $(b,apply), a failing query, etc. Off by default, to keep output terse."
+  in
+  Arg.(value & flag & info ["proof-state-on-error"] ~doc)
+
 (** Gathering options under a configuration. *)
 
 (** [full] gathers the command line arguments common to most commands. *)
 let full : config CLT.t =
   let f gen_obj lib_root map_dir verbose no_warnings debug no_colors
-        record_time too_long confluence termination no_sr_check json =
+        record_time too_long confluence termination no_sr_check json
+        proof_state_on_error =
     {gen_obj; lib_root; map_dir; verbose; no_warnings; debug; no_colors;
-     record_time; too_long; confluence; termination; no_sr_check; json}
+     record_time; too_long; confluence; termination; no_sr_check; json;
+     proof_state_on_error}
   in
   let open Term in
   const f $ gen_obj $ lib_root $ map_dir $ verbose $ no_warnings $ debug
   $ no_colors $ record_time $ too_long $ confluence $ termination
-  $ no_sr_check $ json
+  $ no_sr_check $ json $ proof_state_on_error
 
 (** [minimal] gathers the minimal command line options to enable debugging and
     access to the library root. *)

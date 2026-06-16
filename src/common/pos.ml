@@ -81,6 +81,46 @@ let to_string : ?print_dirname:bool -> ?print_fname:bool -> pos -> string =
   else
     Printf.sprintf "%s%d:%d-%d" fname start_line start_col end_col
 
+(** [read_lines fname] reads [fname] into the array of its lines, or returns
+    [None] if it cannot be read. *)
+let read_lines : string -> string array option = fun fname ->
+  match open_in_bin fname with
+  | exception Sys_error _ -> None
+  | ic ->
+    let rec loop acc =
+      match input_line ic with
+      | l -> loop (l :: acc)
+      | exception End_of_file -> List.rev acc
+    in
+    let lines = loop [] in
+    close_in_noerr ic;
+    Some (Array.of_list lines)
+
+(** [excerpt ~context pos] renders the source lines of [pos] with [context]
+    lines of margin on each side, each prefixed by its line number, and marks
+    the offending line(s) with a [>] in the gutter. It returns the empty string
+    when the source is unavailable (no file name or unreadable file), so
+    callers can treat "no snippet" uniformly. *)
+let excerpt : ?context:int -> pos -> string = fun ?(context=2) pos ->
+  match pos.fname with
+  | None -> ""
+  | Some fname ->
+  match read_lines fname with
+  | None -> ""
+  | Some lines ->
+    let n = Array.length lines in
+    let lo = max 1 (pos.start_line - context)
+    and hi = min n (pos.end_line + context) in
+    if lo > n then "" else
+    let w = String.length (string_of_int hi) in
+    let buf = Buffer.create 128 in
+    for i = lo to hi do
+      let marker = if i >= pos.start_line && i <= pos.end_line then ">" else " " in
+      Buffer.add_string buf (Printf.sprintf "%s %*d | %s\n" marker w i lines.(i-1))
+    done;
+    let s = Buffer.contents buf in
+    if s = "" then s else String.sub s 0 (String.length s - 1)
+
 
 
 (** Type of optional positions. *)

@@ -242,6 +242,95 @@ class TestTextModeUnchanged(unittest.TestCase):
                 f"text mode leaked JSON record on stdout: {line!r}")
 
 
+class TestProofStateOnError(unittest.TestCase):
+    """--proof-state-on-error, in JSON mode, keeps [message] the bare reason and
+    attaches the proof state as STRUCTURED fields: [goals_before] always, and
+    [goals_after] for a subproof-count mismatch (detected after the step ran).
+    The ascii excerpt is text-mode only. Off by default; range/severity never
+    change."""
+
+    FAIL = "tests/KO/proof_state_on_error.lp"    # immediate failure: before only
+    SUBPROOF = "tests/KO/subproof_mismatch.lp"   # post-step failure: before+after
+    REMOVE = "tests/KO/remove.lp"                # has hypotheses in context
+
+    def _error_diag(self, fixture, args):
+        code, out, err = run(["check", "--json"] + args + [fixture])
+        self.assertEqual(err, "",
+            f"stderr should be empty in JSON mode; got {err!r}")
+        self.assertEqual(code, 1, f"KO fixture should exit 1; got {code}")
+        errs = [d for d in by_kind(parse_ndjson(out), "diagnostic")
+                if d["severity"] == "error"]
+        self.assertEqual(len(errs), 1,
+            f"expected exactly one error diagnostic; got {errs!r}")
+        return errs[0]
+
+    def test_off_by_default_is_bare(self):
+        diag = self._error_diag(self.FAIL, [])
+        self.assertEqual(diag["message"], 'Call to tactic "fail".',
+            f"default should be the bare reason; got {diag['message']!r}")
+        self.assertNotIn("goals_before", diag, "no goals fields without the flag")
+
+    def test_flag_keeps_message_bare_and_adds_structured_goals(self):
+        diag = self._error_diag(self.FAIL, ["--proof-state-on-error"])
+        # The message is still the bare reason — no rendered text, no excerpt.
+        self.assertEqual(diag["message"], 'Call to tactic "fail".')
+        self.assertNotIn("Tactic application failure", diag["message"])
+        # The proof state arrives as structured goals instead.
+        before = diag["goals_before"]
+        self.assertEqual(len(before), 1, f"expected one goal; got {before!r}")
+        self.assertEqual(before[0]["concl"], "π A")
+        self.assertEqual(before[0]["hyps"], [])
+        # An immediate failure has no post-step state.
+        self.assertNotIn("goals_after", diag)
+
+    def test_hypotheses_are_structured(self):
+        diag = self._error_diag(self.REMOVE, ["--proof-state-on-error"])
+        hyps = diag["goals_before"][0]["hyps"]
+        # name/type pairs, with the type clean (no leading ": ").
+        self.assertEqual(hyps[0], {"name": "a", "type": "A"},
+            f"hypotheses should be structured name/type; got {hyps!r}")
+
+    def test_subproof_mismatch_has_before_and_after(self):
+        diag = self._error_diag(self.SUBPROOF, ["--proof-state-on-error"])
+        self.assertEqual(diag["message"],
+            "Missing subproofs (0 subproofs for 2 subgoals)")
+        # before = the single goal it was applied to; after = the 2 subgoals.
+        self.assertEqual(len(diag["goals_before"]), 1)
+        after = diag["goals_after"]
+        self.assertEqual(len(after), 2,
+            f"the post-step state should have 2 subgoals; got {after!r}")
+        self.assertEqual(after[0]["concl"], "π (Q z)")
+
+    def test_subproof_mismatch_off_is_unchanged(self):
+        diag = self._error_diag(self.SUBPROOF, [])
+        self.assertTrue(
+            diag["message"].startswith("Missing subproofs (0 subproofs for 2"),
+            f"off-mode subproof error should be unchanged; got {diag!r}")
+        self.assertNotIn("goals_before", diag)
+
+    def test_flag_preserves_range_and_severity(self):
+        off = self._error_diag(self.FAIL, [])
+        on = self._error_diag(self.FAIL, ["--proof-state-on-error"])
+        self.assertEqual(off["range"], on["range"],
+            "the flag must not move the diagnostic range")
+        self.assertEqual(off["severity"], on["severity"])
+
+
+class TestProofStateOnErrorTextMode(unittest.TestCase):
+    """The human-facing counterpart: without --json, the flag renders the rich
+    text diagnostic (excerpt + labelled sections) rather than structured JSON."""
+
+    def test_text_mode_renders_rich_diagnostic(self):
+        code, out, err = run(
+            ["check", "--proof-state-on-error", "tests/KO/remove.lp"])
+        self.assertEqual(code, 1)
+        text = out + err
+        for marker in ("Tactic application failure:", "> 8 |   remove a;",
+                       "Reason for failure:",
+                       "Before tactic application, the proof state was:"):
+            self.assertIn(marker, text, f"missing {marker!r} in text output")
+
+
 if __name__ == "__main__":
     # Ensure tests can find each other as a package.
     here = os.path.dirname(__file__)

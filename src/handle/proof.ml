@@ -27,6 +27,28 @@ let goals : proof_state pp = fun ppf ps ->
       let goal ppf i g = out ppf "\n%d. %a" (i+1) Goal.pp_no_hyp g in
       List.iteri (goal ppf) gs
 
+(** [goals_json ps] encodes the open goals of [ps] as JSON: a list of objects,
+    each carrying its hypotheses (as name/type pairs) and its conclusion. This
+    is the structured counterpart of {!val:goals}, for machine consumers (see
+    {!module:Common.Json_out}). *)
+let goals_json : proof_state -> Yojson.Basic.t = fun ps ->
+  let info_json ((hyps, concl) : Goal.info) : Yojson.Basic.t =
+    let hyp (n, t) : Yojson.Basic.t =
+      (* [to_info] renders a hypothesis as ": T" (typed) or " ≔ D" (a local
+         definition); drop the ": " so a typed [type] field is just [T]. *)
+      let t =
+        if String.length t >= 2 && t.[0] = ':' && t.[1] = ' '
+        then String.sub t 2 (String.length t - 2) else t in
+      `Assoc ["name", `String n; "type", `String t] in
+    let hyps = `List (List.map hyp hyps) in
+    match concl with
+    | Typ (gid, typ) ->
+        `Assoc ["meta", `String gid; "hyps", hyps; "concl", `String typ]
+    | Unif constr ->
+        `Assoc ["hyps", hyps; "constr", `String constr]
+  in
+  `List (List.map (fun g -> info_json (Goal.to_info g)) ps.proof_goals)
+
 (** [remove_solved_goals ps] removes from the proof state [ps] the typing
    goals that are solved. *)
 let remove_solved_goals : proof_state -> proof_state = fun ps ->
