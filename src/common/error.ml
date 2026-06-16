@@ -11,15 +11,32 @@ let no_warnings = Stdlib.ref false
 (** [wrn popt fmt] prints a yellow warning message with [Format] format [fmt].
     Note that the output buffer is flushed by the function, and that output is
     prefixed with the position [popt] if given. A newline is automatically put
-    at the end of the message as well. *)
+    at the end of the message as well.
+
+    In [--json] mode the message is captured into a buffer and emitted as a
+    [diagnostic] record with severity [warning]; no text is written to
+    stderr. *)
 let wrn : Pos.popt -> 'a outfmt -> 'a = fun pos fmt ->
-  Color.update_with_color !err_fmt;
   let open Stdlib in
-  let fprintf = if !no_warnings then Format.ifprintf else out in
-  match pos with
-  | None   -> fprintf !err_fmt (Color.yel fmt ^^ "@.")
-  | Some _ ->
-    fprintf !err_fmt (Color.yel ("[%a]@ " ^^ fmt) ^^ "@.") Pos.pp pos
+  if !Json_out.enabled then begin
+    if !no_warnings then Format.ifprintf Format.str_formatter fmt
+    else
+      (* [kasprintf] renders the fully-applied format into a string and
+         delivers it to the continuation, handling internal flushing for
+         us. Equivalent to [asprintf] with a continuation; cleaner than
+         hand-rolling [kfprintf] + [formatter_of_buffer] + a manual flush
+         in the continuation. *)
+      Format.kasprintf
+        (fun msg -> Json_out.diagnostic ~severity:`Warning pos msg)
+        fmt
+  end else begin
+    Color.update_with_color !err_fmt;
+    let fprintf = if !no_warnings then Format.ifprintf else out in
+    match pos with
+    | None   -> fprintf !err_fmt (Color.yel fmt ^^ "@.")
+    | Some _ ->
+      fprintf !err_fmt (Color.yel ("[%a]@ " ^^ fmt) ^^ "@.") Pos.pp pos
+  end
 
 (** [no_wrn f x] disables warnings before executing [f x] and then restores
     the initial state of warnings. The result of [f x] is returned. *)
@@ -62,17 +79,35 @@ let fatal_no_pos : ('a,'b) koutfmt -> 'a = fun fmt ->
     expected and unexpected exceptions by displaying a graceful error message.
     In case of an error, the program is (irrecoverably) stopped with exit code
     [1] (indicating failure). Hence, [handle_exceptions] should only be called
-    by the main program logic, not by the internals. *)
+    by the main program logic, not by the internals.
+
+    In [--json] mode, the message is emitted as a [diagnostic] record with
+    severity [error]; no text is written to stderr. *)
 let handle_exceptions : (unit -> unit) -> unit = fun f ->
-  let exit_with : type a b. (a,b) koutfmt -> a = fun fmt ->
-    Color.update_with_color Format.err_formatter;
-    Format.kfprintf (fun _ -> exit 1) Format.err_formatter
-      (Color.red (fmt ^^ "@."))
-  in
-  try f () with
-  | Fatal(None,    msg) -> exit_with "%s" msg
-  | Fatal(Some(p), msg) -> exit_with "[%a] %s" Pos.pp p msg
-  | e ->
-      exit_with "Uncaught [%s].\n%s"
-        (Printexc.to_string e)
-        (Printexc.get_backtrace())
+  if Stdlib.(!Json_out.enabled) then begin
+    let emit_and_exit pos msg =
+      Json_out.diagnostic ~severity:`Error pos msg; exit 1
+    in
+    try f () with
+    | Fatal(None,    msg) -> emit_and_exit None msg
+    | Fatal(Some(p), msg) -> emit_and_exit p msg
+    | e ->
+      let msg =
+        Printf.sprintf "Uncaught [%s].\n%s"
+          (Printexc.to_string e) (Printexc.get_backtrace())
+      in
+      emit_and_exit None msg
+  end else begin
+    let exit_with : type a b. (a,b) koutfmt -> a = fun fmt ->
+      Color.update_with_color Format.err_formatter;
+      Format.kfprintf (fun _ -> exit 1) Format.err_formatter
+        (Color.red (fmt ^^ "@."))
+    in
+    try f () with
+    | Fatal(None,    msg) -> exit_with "%s" msg
+    | Fatal(Some(p), msg) -> exit_with "[%a] %s" Pos.pp p msg
+    | e ->
+        exit_with "Uncaught [%s].\n%s"
+          (Printexc.to_string e)
+          (Printexc.get_backtrace())
+  end

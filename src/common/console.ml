@@ -18,11 +18,18 @@ let set_default_verbose : int -> unit = fun i ->
 
 (** [out lvl fmt] prints an output message using the format [fmt], but only if
     [lvl] is strictly greater than the current verbosity level.  Note that the
-    output channel is automatically flushed if logging modes are enabled. *)
+    output channel is automatically flushed if logging modes are enabled.
+
+    In [--json] mode all calls are silenced: banners like "Start checking"
+    have no structured equivalent and would interleave with NDJSON output. *)
 let out : int -> 'a outfmt -> 'a = fun lvl fmt ->
-  Color.update_with_color Stdlib.(!out_fmt);
-  let out = Format.(if lvl > !verbose then ifprintf else fprintf) in
-  out Stdlib.(!out_fmt) (fmt ^^ "@.")
+  if Stdlib.(!Json_out.enabled) then
+    Format.ifprintf Stdlib.(!out_fmt) (fmt ^^ "@.")
+  else begin
+    Color.update_with_color Stdlib.(!out_fmt);
+    let out = Format.(if lvl > !verbose then ifprintf else fprintf) in
+    out Stdlib.(!out_fmt) (fmt ^^ "@.")
+  end
 
 (** List of registered boolean flags, with their default values. *)
 let boolean_flags : (bool * bool ref) StrMap.t Stdlib.ref =

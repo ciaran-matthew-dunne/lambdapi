@@ -24,7 +24,8 @@ type config =
   ; too_long    : float
   ; confluence  : string option
   ; termination : string option
-  ; no_sr_check : bool }
+  ; no_sr_check : bool
+  ; json        : bool }
 
 (** Short synonym of the [config] type. *)
 type t = config
@@ -42,19 +43,27 @@ let default_config =
   ; too_long    = infinity
   ; confluence  = None
   ; termination = None
-  ; no_sr_check = false }
+  ; no_sr_check = false
+  ; json        = false }
 
 (** [init cfg] runs the necessary initializations according to [cfg]. This has
     to be done prior to any other (non-trivial) task. *)
 let init : config -> unit = fun cfg ->
-  (* Set all the flags and configs. *)
+  (* Output-mode flags go first: any [Fatal] raised by the rest of
+     initialisation (bad [--lib-root], malformed [--map-dir], …) has to
+     reach [handle_exceptions] with JSON mode already on, otherwise it
+     would print to stderr as text and violate the documented contract.
+     --json also implies --no-colors — an NDJSON stream with ANSI
+     embedded in string fields would defeat the point. *)
+  Json_out.enabled := cfg.json;
+  Color.color := (not cfg.no_colors) && (not cfg.json);
+  (* Set all the remaining flags and configs. *)
   Handle.Compile.gen_obj := cfg.gen_obj;
   Library.set_lib_root cfg.lib_root;
   List.iter Library.add_mapping cfg.map_dir;
   Option.iter Console.set_default_verbose cfg.verbose;
   Error.no_warnings := cfg.no_warnings;
   Logger.set_default_debug cfg.debug;
-  Color.color := not cfg.no_colors;
   Debug.do_record_time := cfg.record_time;
   Handle.Command.too_long := cfg.too_long;
   Handle.Command.sr_check := not cfg.no_sr_check;
@@ -199,19 +208,32 @@ let termination : string option CLT.t =
   in
   Arg.(value & opt (some string) None & info ["termination"] ~docv:"CMD" ~doc)
 
+let json : bool CLT.t =
+  let doc =
+    Printf.sprintf
+      "Emit newline-delimited JSON records (NDJSON) on standard output \
+       instead of human-oriented colored text. Useful for batch harnesses \
+       (CI drivers, IDE integrations) that consume Lambdapi output \
+       programmatically. Implies $(b,--no-colors). Schema version: %s. \
+       Run $(b,lambdapi json-schema-version) to print the version \
+       machine-readably. See the $(b,check) command for the specific \
+       records produced." Json_out.schema_version
+  in
+  Arg.(value & flag & info ["json"] ~doc)
+
 (** Gathering options under a configuration. *)
 
 (** [full] gathers the command line arguments common to most commands. *)
 let full : config CLT.t =
   let f gen_obj lib_root map_dir verbose no_warnings debug no_colors
-        record_time too_long confluence termination no_sr_check =
+        record_time too_long confluence termination no_sr_check json =
     {gen_obj; lib_root; map_dir; verbose; no_warnings; debug; no_colors;
-     record_time; too_long; confluence; termination; no_sr_check }
+     record_time; too_long; confluence; termination; no_sr_check; json}
   in
   let open Term in
   const f $ gen_obj $ lib_root $ map_dir $ verbose $ no_warnings $ debug
   $ no_colors $ record_time $ too_long $ confluence $ termination
-  $ no_sr_check
+  $ no_sr_check $ json
 
 (** [minimal] gathers the minimal command line options to enable debugging and
     access to the library root. *)

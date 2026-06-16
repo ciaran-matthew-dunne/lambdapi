@@ -22,6 +22,7 @@ The available commands are:
 * ``uninstall``: uninstalls the specified package.
 * ``version``: give the current version of Lambdapi.
 * ``websearch``: starts a webserver to search the library.
+* ``json-schema-version``: print the schema version used by ``--json`` output.
 
 The commands ``parse``, ``export`` and ``index`` can trigger the
 compilation of dependencies if the required object files (``.lpo``
@@ -62,6 +63,90 @@ The commands ``check``, ``decision-tree``, ``export``, ``parse``,
 * ``--timeout=<NUM>`` gives up type-checking after the given number of seconds.  Note that the timeout is reset between each file, and that the parameter of the command is expected to be a natural number.
 
 * ``-v <NUM>``, ``--verbose=<NUM>`` sets the verbosity level to the given natural number (the default value is 1). A value of 0 should not print anything, and the higher values print more and more information.
+
+* ``--json`` switches output from human-oriented coloured text to
+  newline-delimited JSON (NDJSON) on standard output. One complete JSON
+  object is printed per line; standard error is reserved for hard
+  crashes. Implies ``--no-colors``. See :ref:`json-output` for the
+  record schema.
+
+.. _json-output:
+
+JSON output
+-----------
+
+When ``--json`` is passed, Lambdapi emits newline-delimited JSON
+(``application/x-ndjson``): one complete JSON object per line on
+standard output, no ANSI escapes, nothing human-oriented.
+
+Every record has these common fields:
+
+* ``kind`` — the record's kind (``file_start``, ``file_end``,
+  ``diagnostic``, or ``summary``).
+* ``ts`` — ISO 8601 UTC timestamp with millisecond resolution.
+
+Record kinds produced by ``check --json``:
+
+``file_start``
+  Emitted once per input file, before type-checking begins.
+
+  ::
+
+    {"kind":"file_start","ts":"...","file":"bench/foo.lp"}
+
+``diagnostic``
+  Emitted for every warning and error reached while processing a file.
+  ``severity`` is one of ``"error"``, ``"warning"``, ``"info"``. When the
+  diagnostic has a source position, ``file`` and ``range`` are present;
+  they are omitted for command-line-level diagnostics that don't pin to
+  a location. Lines in ``range`` are 1-indexed; columns are 0-indexed
+  UTF-8 codepoints — matching the ``file:line:col`` banners shown in
+  text mode.
+
+  ::
+
+    {"kind":"diagnostic","ts":"...","file":"bench/foo.lp",
+     "range":{"start":{"line":5,"col":17},"end":{"line":5,"col":18}},
+     "severity":"error","message":"Syntax error. Expected: ]."}
+
+``file_end``
+  Emitted once per input file when processing completes. ``status`` is
+  ``"ok"`` when the file typed cleanly, ``"error"`` when a ``Fatal``
+  surfaced. ``elapsed_ms`` is wall-clock time spent on the file.
+
+  ::
+
+    {"kind":"file_end","ts":"...","file":"bench/foo.lp",
+     "status":"ok","elapsed_ms":412}
+
+``summary``
+  Emitted once at the very end of the batch when the batch completes
+  normally (every file saw a ``file_end``). If Lambdapi itself aborts
+  with a top-level ``Fatal`` or crashes, the stream terminates after
+  the ``diagnostic`` without a ``summary`` — consumers should treat its
+  absence as "the batch didn't finish" rather than blocking on it.
+  ``schema_version`` lets consumers validate compatibility; fetch the
+  same version directly with ``lambdapi json-schema-version``.
+
+  ::
+
+    {"kind":"summary","ts":"...","schema_version":"1.0.0",
+     "files_checked":3,"files_ok":2,"files_failed":1,"elapsed_ms":847}
+
+**Exit code.** Unchanged from text mode: ``0`` when every file checked
+clean, non-zero otherwise.
+
+**Batch semantics.** ``--json`` changes the ``check`` subcommand's
+fail-fast behaviour: a failing file produces a ``diagnostic`` and a
+``file_end`` with ``status:"error"``, then the batch continues with the
+next file. The exit code is still non-zero if any file failed. Text
+mode (no ``--json``) remains fail-fast.
+
+**Schema stability.** The set of ``kind`` values and ``severity`` values
+is part of a versioned schema (see ``schema_version`` on the
+``summary`` record). Adding a new kind is a minor-version bump;
+renaming or removing one is a major-version bump. Consumers must ignore
+unknown fields so additive evolution stays backwards-compatible.
 
 check
 -----

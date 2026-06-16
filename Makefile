@@ -46,6 +46,10 @@ test_lsp: lambdapi
 test_load: lambdapi
 	@tests/test_load.sh
 
+.PHONY: test_json
+test_json: lambdapi
+	@python3 -m tests.json
+
 .PHONY: test_export_dk
 test_export_dk: lambdapi
 	@tests/export_dk.sh
