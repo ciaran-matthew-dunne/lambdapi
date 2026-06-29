@@ -149,12 +149,19 @@ let add_mapping : Path.t * string -> unit = fun (mp, fn) ->
     try Filename.realpath fn
     with Invalid_argument f -> fatal_no_pos "%s: No such file or directory" f
   in
-  let new_mapping =
-    try LibMap.add mp fn !lib_mappings
-    with LibMap.Already_mapped ->
-      fatal_no_pos "Module path [%a] is already mapped." Path.pp mp
+  let exists = ref false in
+  let check_existing existing_mp existing_fn =
+    if existing_mp = mp && existing_fn = fn then exists := true
   in
-  lib_mappings := new_mapping
+  iter check_existing;
+  if not !exists then
+    let new_mapping =
+      try LibMap.add mp fn !lib_mappings
+      with LibMap.Already_mapped ->
+        fatal_no_pos "Module path [%a] is already mapped." Path.pp mp
+    in
+    lib_mappings := new_mapping
+
 
 (** [file_of_path mp] converts module path [mp] into the corresponding "file
     path" (with no attached extension). It is assumed that [lib_root] has been
