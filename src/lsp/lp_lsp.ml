@@ -503,7 +503,15 @@ let do_definition ofmt ~id params =
     let sym_info =
       match get_symbol pt doc.map with
       | None ->
-        LIO.log_error "do_definition" "no symbol at point"; `Null
+        (* No symbol at point: fall back to module-path lookup, so
+           go-to-definition on the path of a require/open jumps to the
+           start of that module's file. *)
+        (match RangeMap.find pt doc.path_map with
+         | Some (_, path) ->
+           let file = Library.(file_of_path path ^ lp_src_extension) in
+           mk_definfo file (Pos.file_start file)
+         | None ->
+           LIO.log_error "do_definition" "no symbol at point"; `Null)
       | Some (qid, _) ->
         LIO.log_error "do_definition" (snd qid);
         match Pure.find_sym ss qid with
