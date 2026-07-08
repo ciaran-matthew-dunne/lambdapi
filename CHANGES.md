@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Tactic `#print` to print a symbol or the current goal.
 - Export to Lean.
 - Tactic `all_hyps t` calls parameterized tactic term t on all hypotheses ignoring failing calls.
+- LSP server: completion (in-scope symbols; tactic keywords and goal hypotheses inside proofs), hierarchical document symbols, go-to-definition on `require`/`open` module paths, `didChange` debouncing, and an integration test suite (`make test_lsp`).
 
 ### Changed
 
