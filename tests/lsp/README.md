@@ -26,9 +26,14 @@ over whatever is on `PATH`, so you always test the current tree.
 
 ## Layout
 
+- `__init__.py`    — empty; marks `tests/lsp` as a regular Python package
+  so the modules can import each other (`from .base import …`) and the
+  suite runs as `python3 -m tests.lsp` on every supported Python
+- `__main__.py`    — entry point for `python3 -m tests.lsp`: discovers
+  and runs the whole suite
+- `base.py`        — `LSPTestCase` with per-test server + fixture helpers
 - `client.py`      — JSON-RPC / stdio client (`LSPServer` class)
 - `source.py`      — pattern-based position finder for fixtures
-- `base.py`        — `LSPTestCase` with per-test server + fixture helpers
 - `fixtures/*.lp`  — small focused test documents
 - `test_*.py`      — one file per LSP concern (lifecycle, diagnostics, …)
 
