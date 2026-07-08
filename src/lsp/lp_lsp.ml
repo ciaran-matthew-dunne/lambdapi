@@ -33,8 +33,100 @@ let odict_field name dict =
 module LIO = Lsp_io
 module LSP = Lsp_base
 
+(* Walk a nested path of object keys; return the leaf or [None] if any
+   segment is missing / has the wrong shape. *)
+let json_path (j : J.t) (keys : string list) : J.t option =
+  List.fold_left
+    (fun j k ->
+       match j with
+       | Some (`Assoc fields) -> List.assoc_opt k fields
+       | _ -> None)
+    (Some j) keys
+
+(** [path_of_file_uri uri] strips the [file://] scheme and percent-decodes
+    the remainder. Returns [None] when [uri] is not a [file:] URI. *)
+let path_of_file_uri (uri : string) : string option =
+  if String.is_prefix "file://" uri then
+    Some (Uri.pct_decode (String.sub uri 7 (String.length uri - 7)))
+  else None
+
+(* Client capabilities we gate features on, read from the [initialize]
+   request. *)
+
+(* [textDocument.completion.completionItem.snippetSupport]: snippet
+   syntax allowed in completion [insertText]. *)
+let snippet_support = ref false
+
+(* [textDocument.documentSymbol.hierarchicalDocumentSymbolSupport]:
+   hierarchical [DocumentSymbol[]] responses understood; when false,
+   fall back to flat [SymbolInformation[]]. *)
+let hierarchical_symbols = ref false
+
+(* [textDocument.completion.completionItem.documentationFormat]
+   includes "markdown": completion docs may be sent as markdown
+   [MarkupContent] (plain strings render literally otherwise). *)
+let markdown_completion_docs = ref false
+
 (* Request Handling: The client expects a reply *)
-let do_initialize ofmt ~id _params =
+let do_initialize ofmt ~id params =
+  (* Read clientCapabilities for features we gate on client support. *)
+  let client_caps =
+    Option.get `Null (List.assoc_opt "capabilities" params) in
+  let cap_bool path =
+    match json_path client_caps path with
+    | Some (`Bool b) -> b
+    | _ -> false
+  in
+  snippet_support :=
+    cap_bool
+      ["textDocument"; "completion"; "completionItem"; "snippetSupport"];
+  hierarchical_symbols :=
+    cap_bool
+      ["textDocument"; "documentSymbol";
+       "hierarchicalDocumentSymbolSupport"];
+  markdown_completion_docs :=
+    (match json_path client_caps
+             ["textDocument"; "completion"; "completionItem";
+              "documentationFormat"]
+     with
+     | Some (`List fmts) -> List.mem (`String "markdown") fmts
+     | _ -> false);
+  (* Apply the workspace's [lambdapi.pkg] (if any) so module mappings
+     are live before the first document is opened. [rootUri] is the
+     pre-3.6 field; [workspaceFolders] is the current one — clients
+     typically send BOTH for the same directory, so deduplicate. And a
+     failure (e.g. "module path already mapped") must never abort
+     [initialize] — the client would kill the server and retry in a
+     loop; per-file [Package.apply_config] still runs on every open. *)
+  let apply_folder uri =
+    match path_of_file_uri uri with
+    | Some p ->
+      (try
+         LIO.log_error "initialize" ("applying package config at " ^ p);
+         Parsing.Package.apply_config p
+       with e ->
+         LIO.log_error "initialize"
+           ("package config skipped: " ^ Printexc.to_string e))
+    | None -> ()
+  in
+  let root_folders =
+    match List.assoc_opt "rootUri" params with
+    | Some (`String uri) -> [uri]
+    | _ -> []
+  in
+  let ws_folders =
+    match List.assoc_opt "workspaceFolders" params with
+    | Some (`List folders) ->
+      List.filter_map
+        (fun f ->
+           match json_path f ["uri"] with
+           | Some (`String uri) -> Some uri
+           | _ -> None)
+        folders
+    | _ -> []
+  in
+  List.iter apply_folder
+    (List.sort_uniq Stdlib.compare (root_folders @ ws_folders));
   let msg = LSP.mk_reply ~id ~result:(
       `Assoc ["capabilities",
        `Assoc [
@@ -42,6 +134,11 @@ let do_initialize ofmt ~id _params =
         ; "documentSymbolProvider", `Bool true
         ; "hoverProvider", `Bool true
         ; "definitionProvider", `Bool true
+        (* No [triggerCharacters]: "." would be the module-path
+           separator, but completion is not prefix-aware yet, so a
+           dot-triggered popup would not be filtered to the module.
+           Clients still trigger on identifier characters themselves. *)
+        ; "completionProvider", `Assoc ["resolveProvider", `Bool true]
         ; "codeActionProvider", `Bool false
         ]]) in
   LIO.send_json ofmt msg
@@ -66,13 +163,6 @@ let do_check_text ofmt ~doc =
   Hashtbl.replace completed_table doc.uri doc;
   LIO.send_json ofmt @@ diags
 
-let do_change ofmt ~doc change =
-  let open Lp_doc in
-  LIO.log_error "checking file"
-    (doc.uri ^ " / version: " ^ (string_of_int doc.version));
-  let doc = { doc with text = string_field "text" change; } in
-  do_check_text ofmt ~doc
-
 let do_open ofmt params =
   let document = dict_field "textDocument" params in
   let uri, version, text =
@@ -95,9 +185,18 @@ let do_change ofmt params =
     string_field "uri" document,
     int_field "version" document in
   let changes = List.map U.to_assoc @@ list_field "contentChanges" params in
+  LIO.log_error "checking file"
+    (uri ^ " / version: " ^ (string_of_int version));
   let doc = Hashtbl.find doc_table uri in
   let doc = { doc with Lp_doc.version; } in
-  List.iter (do_change ofmt ~doc) changes
+  (* With full-document sync each change carries the whole new text;
+     the fold applies them all, then a single re-check runs. *)
+  let doc =
+    List.fold_left
+      (fun (doc : Lp_doc.t) change ->
+        { doc with text = string_field "text" change })
+      doc changes in
+  do_check_text ofmt ~doc
 
 let do_close _ofmt params =
   let document = dict_field "textDocument" params in
@@ -143,6 +242,57 @@ let kind_of_type tm =
   | _ ->
     12                         (* Function *)
 
+let mk_document_symbol ?(children=[]) ~name ~kind ~range ~selection_range ()
+  : J.t =
+  `Assoc [
+    "name", `String name;
+    "kind", `Int kind;
+    "range", range;
+    "selectionRange", selection_range;
+    "children", `List children;
+  ]
+
+(** Build hierarchical [DocumentSymbol[]] from the parsed AST. Only
+    declarations that introduce user-visible symbols are emitted:
+    [symbol] (Function) and [inductive] (Enum with constructors as
+    EnumMember children). Require/open, rules, builtins, queries,
+    notations, etc. are skipped. *)
+let document_symbols_of_nodes (nodes : Lp_doc.doc_node list) : J.t list =
+  let open Parsing.Syntax in
+  let range_or_fallback (p : Pos.popt) (fallback : J.t) =
+    match p with Some p -> LSP.mk_range p | None -> fallback
+  in
+  (* [nodes] is stored in reverse (head = most recent); restore
+     top-to-bottom order for the outline. *)
+  List.concat_map (fun ({ ast; _ } : Lp_doc.doc_node) ->
+    match Pure.Command.get_pos ast with
+    | None -> []
+    | Some cmd_pos ->
+      let cmd_range = LSP.mk_range cmd_pos in
+      match Pure.Command.get_elt ast with
+      | P_symbol s ->
+        let sel = range_or_fallback s.p_sym_nam.pos cmd_range in
+        [ mk_document_symbol
+            ~name:s.p_sym_nam.elt ~kind:12   (* Function *)
+            ~range:cmd_range ~selection_range:sel () ]
+      | P_inductive (_, _, inds) ->
+        List.map (fun (ind : p_inductive) ->
+          let (iname, _, cons) = ind.Pos.elt in
+          let ind_range = range_or_fallback ind.Pos.pos cmd_range in
+          let sel = range_or_fallback iname.pos ind_range in
+          let children = List.map (fun (cname, _ctyp) ->
+            let crange = range_or_fallback cname.Pos.pos ind_range in
+            mk_document_symbol
+              ~name:cname.Pos.elt ~kind:22   (* EnumMember *)
+              ~range:crange ~selection_range:crange ()
+          ) cons in
+          mk_document_symbol
+            ~name:iname.elt ~kind:10         (* Enum *)
+            ~range:ind_range ~selection_range:sel ~children ()
+        ) inds
+      | _ -> []
+  ) (List.rev nodes)
+
 let do_symbols ofmt ~id params =
   let file, _, doc = grab_doc params in
   match doc.final with
@@ -150,21 +300,26 @@ let do_symbols ofmt ~id params =
     let msg = LSP.mk_reply ~id ~result:`Null in
     LIO.send_json ofmt msg
   | Some ss ->
-    Pure.restore_time ss;
-    let sym = Pure.get_symbols ss in
-    let sym =
-      Extra.StrMap.fold
-        (fun _ s l ->
-          let open Term in
-          (* LIO.log_error "sym"
-          ( s.sym_name ^ " | "
-          ^ Format.asprintf "%a" term !(s.sym_type)); *)
-          Option.map_default
-            (fun p -> mk_syminfo file
-                (s.sym_name, s.sym_path, kind_of_type s, p) :: l) l s.sym_pos)
-        sym [] in
-    let msg = LSP.mk_reply ~id ~result:(`List sym) in
-    LIO.send_json ofmt msg
+    let result =
+      if !hierarchical_symbols then
+        (* Built from the parsed AST alone; no signature state needed. *)
+        `List (document_symbols_of_nodes doc.Lp_doc.nodes)
+      else
+        let () = Pure.restore_time ss in
+        let sym = Pure.get_symbols ss in
+        let syms =
+          Extra.StrMap.fold
+            (fun _ s l ->
+              let open Term in
+              Option.map_default
+                (fun p ->
+                  mk_syminfo file
+                    (s.sym_name, s.sym_path, kind_of_type s, p) :: l)
+                l s.sym_pos)
+            sym [] in
+        `List syms
+    in
+    LIO.send_json ofmt (LSP.mk_reply ~id ~result)
 
 
 let get_docTextPosition params =
@@ -226,6 +381,320 @@ let get_node_at_pos doc line pos =
       let loc = Pure.Command.get_pos ast in
       in_range ?loc (line,pos)
     ) doc.Lp_doc.nodes
+
+(* --- Cursor context: proof scripts, raw tokens, tactic docs -------- *)
+
+(* True iff the command at the cursor carries a proof script. Every
+   [P_symbol] node has a goals snapshot (symbol elaboration goes
+   through the proof machinery), so a non-empty [goals] field would
+   not discriminate. *)
+let in_proof_at (doc : Lp_doc.t) line character : bool =
+  match get_node_at_pos doc line character with
+  | Some n ->
+    (match Pure.Command.get_elt n.Lp_doc.ast with
+     | Parsing.Syntax.P_symbol {p_sym_prf = Some _; _} -> true
+     | _ -> false)
+  | None -> false
+
+(* Identifier-ish token at the (0-based) [line]/[col] of [doc]'s text:
+   the maximal run of non-delimiter code points around the cursor.
+   Columns are counted in code points, matching the position handling
+   in the rest of the server. Being text-based, it also works in
+   regions the checker never reached (mid-edit text, code past a
+   parse error). *)
+let token_at_pos (doc : Lp_doc.t) line col : string option =
+  match List.nth_opt (String.split_on_char '\n' doc.Lp_doc.text) line with
+  | None -> None
+  | Some str ->
+    (* Byte offset of each code point, with the total length as a
+       final sentinel. *)
+    let offs = ref [] and i = ref 0 in
+    let n = String.length str in
+    while !i < n do
+      offs := !i :: !offs;
+      i := !i + Uchar.utf_decode_length (String.get_utf_8_uchar str !i)
+    done;
+    let offs = Array.of_list (List.rev (n :: !offs)) in
+    let ncp = Array.length offs - 1 in
+    (* Delimiters are ASCII; a multi-byte code point (first byte
+       [>= '\x80']) always belongs to a token. *)
+    let is_delim k =
+      match str.[offs.(k)] with
+      | ' ' | '\t' | '\r' | '(' | ')' | '[' | ']' | '{' | '}'
+      | ';' | ',' | '"' | '.' -> true
+      | _ -> false
+    in
+    if col < 0 || col >= ncp || is_delim col then None
+    else
+      let s = ref col and e = ref col in
+      while !s > 0 && not (is_delim (!s - 1)) do decr s done;
+      while !e + 1 < ncp && not (is_delim (!e + 1)) do incr e done;
+      Some (String.sub str offs.(!s) (offs.(!e + 1) - offs.(!s)))
+
+(** Tactic keywords offered as completions inside a proof and
+    documented on hover. Each entry is [(name, detail, doc, snippet)]:
+    [detail] is a one-line summary shown next to the completion label,
+    [doc] the fuller documentation (sourced from [doc/tactics.rst],
+    [doc/tacticals.rst] and [doc/equality.rst]) shown in the completion
+    docs panel and on hover, and [snippet] a TextMate-style template
+    used when the client advertises [snippetSupport] (otherwise the
+    label is inserted verbatim). The list should stay in sync with the
+    tactics of [Syntax.p_tactic]. *)
+let tactic_completions : (string * string * string * string) list = [
+  "admit", "end proof as axiom",
+  "Adds new symbols (axioms) to the environment proving the focused \
+   goal.",
+  "admit";
+
+  "all_hyps", "apply a term to every hypothesis",
+  "`all_hyps t` (with `t : Π p, Prf p → T`) applies `t _ xₙ`, …, \
+   `t _ x₁` on the hypotheses `x₁ … xₙ`, ignoring failing calls; \
+   fails if every call failed.",
+  "all_hyps ${1:term}";
+
+  "apply", "apply a term to the goal",
+  "`apply t` refines the current goal with `t _ … _`, generating one \
+   subgoal for each argument that cannot be inferred.",
+  "apply ${1:term}";
+
+  "assume", "introduce hypotheses",
+  "If the focused goal is of the form `Π x₁ … xₙ, T`, then \
+   `assume h₁ … hₙ` replaces it by `T` with each `xᵢ` replaced by \
+   `hᵢ`.",
+  "assume ${1:h}";
+
+  "assumption", "close goal by an hypothesis",
+  "Proves the current goal if it is (an instance of) an hypothesis.",
+  "assumption";
+
+  "change", "change the goal type",
+  "`change t` replaces the current goal `u` by `t`, provided \
+   `t ≡ u`.",
+  "change ${1:type}";
+
+  "eval", "interpret a term as a tactic",
+  "`eval t` normalizes the term `t` and interprets the result as a \
+   tactic expression built from the tactic builtins.",
+  "eval ${1:term}";
+
+  "fail", "always fail",
+  "Always fails. Useful to stop at a particular point while \
+   developing a proof.",
+  "fail";
+
+  "first_hyp", "apply a term to hypotheses until one succeeds",
+  "`first_hyp t` (with `t : Π p, Prf p → T`) applies `t _ xₙ` on the \
+   last hypothesis; if the goal is not solved, tries the next \
+   hypothesis, and so on, failing if none succeeds.",
+  "first_hyp ${1:term}";
+
+  "focus", "move goal n to the front",
+  "`focus n` moves the n-th goal (`n ≥ 2`) to position 1.",
+  "focus ${1:n}";
+
+  "generalize", "generalize a variable",
+  "If the focused goal is `x₁:A₁, …, y₁:B₁, …, yₚ:Bₚ ⊢ U`, then \
+   `generalize y₁` transforms it into \
+   `x₁:A₁, … ⊢ Π y₁:B₁, …, Π yₚ:Bₚ, U`.",
+  "generalize ${1:x}";
+
+  "have", "introduce an intermediate lemma",
+  "`have x: t` generates a new goal for `t`, then lets you prove the \
+   focused goal with the additional hypothesis `x: t`.",
+  "have ${1:h}: ${2:type}";
+
+  "induction", "structural induction",
+  "If the focused goal is of the form `Π x:I, …` with `I` an \
+   inductive type, refines it by applying the induction principle \
+   of `I`.",
+  "induction";
+
+  "orelse", "try a tactic, else another",
+  "`orelse t₁ t₂` applies `t₁`; if `t₁` fails, applies `t₂`.",
+  "orelse ${1:tac1} ${2:tac2}";
+
+  "refine", "provide a partial proof term",
+  "`refine t` instantiates the focused goal by `t`, which may \
+   contain underscores `_` and metavariable names `?n`; \
+   metavariables that cannot be solved become new goals.",
+  "refine ${1:term}";
+
+  "reflexivity", "close goal by reflexivity",
+  "Solves a goal of the form `Π x₁, …, Π xₙ, P (t = u)` when \
+   `t ≡ u`.",
+  "reflexivity";
+
+  "remove", "remove a hypothesis",
+  "`remove h₁ … hₙ` erases the hypotheses `h₁ … hₙ` from the \
+   context; the goal and the remaining hypotheses must not depend on \
+   them.",
+  "remove ${1:h}";
+
+  "repeat", "repeat a tactic",
+  "`repeat t` applies `t` on the first goal until the number of \
+   goals decreases.",
+  "repeat ${1:tac}";
+
+  "rewrite", "rewrite using an equation",
+  "`rewrite t` rewrites the goal with an equation \
+   `t : Π x₁ … xₙ, P (l = r)` from left to right; prefix with `left` \
+   to rewrite right to left; an optional pattern restricts the \
+   rewritten occurrences.",
+  "rewrite ${1:eq}";
+
+  "set", "define a local abbreviation",
+  "`set x \xe2\x89\x94 t` extends the current context with \
+   `x \xe2\x89\x94 t`.",
+  "set ${1:x} \xe2\x89\x94 ${2:term}";
+
+  "simplify", "simplify the goal",
+  "Normalizes the focused goal with respect to β-reduction and \
+   rewriting rules; `simplify rule off` uses β-reduction only; \
+   `simplify f` unfolds the definition of `f` or applies its rules.",
+  "simplify";
+
+  "solve", "simplify unification goals",
+  "Simplifies unification goals as much as possible.",
+  "solve";
+
+  "symmetry", "swap sides of an equation",
+  "Replaces a goal of the form `P (t = u)` by `P (u = t)`.",
+  "symmetry";
+
+  "try", "try a tactic; never fails",
+  "`try t` applies `t`; if `t` fails, the goal is left unchanged.",
+  "try ${1:tac}";
+
+  "why3", "dispatch to an external prover",
+  "Calls an external prover through the Why3 platform to solve the \
+   current goal; `why3 \"prover\"` selects a specific prover (default \
+   Alt-Ergo, or the one set with the `prover` command).",
+  "why3";
+]
+
+(** Documentation of a tactic keyword, if [name] is one. *)
+let tactic_doc (name : string) : string option =
+  List.find_map
+    (fun (tn, _, doc, _) -> if tn = name then Some doc else None)
+    tactic_completions
+
+let is_tactic_name n = tactic_doc n <> None
+
+(** Documentation of command keywords and symbol modifiers, shown on
+    hover (anywhere in a document, unlike tactic docs which apply
+    inside proofs). Sourced from [doc/commands.rst]. *)
+let keyword_docs : (string * string) list = [
+  "symbol",
+  "Declares or defines a symbol. Syntax: \
+   `modifiers symbol id params [: type] [≔ [term]] [begin proof end] \
+   ;`. Without `≔` it is a declaration (axiom); with `≔` a \
+   definition or theorem.";
+  "inductive",
+  "Defines inductive types with their constructors, and generates \
+   their induction principles `ind_<name>` and rules (requires the \
+   `Prop` and `P` builtins). Mutually defined types are linked with \
+   `with`.";
+  "rule",
+  "Declares rewriting rules for definable symbols, e.g. \
+   `rule add zero $n ↪ $n;`. `$`-prefixed identifiers are pattern \
+   variables. Rules should form a confluent and terminating system; \
+   chain several with `with`.";
+  "with",
+  "Chains additional rewriting rules (`rule … with …`) or links \
+   mutually defined inductive types.";
+  "require",
+  "Imports the non-private symbols, rules and builtins of other \
+   modules, usable qualified (`Stdlib.Bool.true`); `require open` \
+   also puts them in scope; `require … as …` gives the module an \
+   alias.";
+  "open",
+  "Puts into scope the symbols of previously required modules. \
+   Non-private `open`s are transitively inherited.";
+  "builtin",
+  "Maps an internal string literal to a user symbol, e.g. \
+   `builtin \"P\" ≔ …;` — required by some commands, tactics and \
+   notations.";
+  "notation",
+  "Sets the notation of a symbol: `infix`/`prefix`/`postfix` with an \
+   optional priority, or `quantifier`.";
+  "opaque",
+  "The symbol is never reduced to its definition (typical for \
+   theorems). As a command, `opaque x;` makes a previously defined \
+   symbol opaque.";
+  "unif_rule",
+  "Declares a unification rule `t ≡ u ↪ [t₁ ≡ u₁; …]`, tried by the \
+   unification engine when a problem cannot be solved by the default \
+   algorithm.";
+  "coerce_rule",
+  "Declares a coercion rule, used to automatically insert coercions \
+   between types.";
+  "begin",
+  "Starts a proof script solving the pending goals with tactics; \
+   close it with `end`, `admitted` or `abort`.";
+  "end",
+  "Ends a proof script once all goals are solved.";
+  "admitted",
+  "Ends a proof accepting the remaining goals as axioms.";
+  "abort",
+  "Aborts the proof: the symbol is not added to the environment.";
+  "constant",
+  "Property modifier: no rewriting rule or definition can ever be \
+   given to the symbol.";
+  "injective",
+  "Property modifier: the symbol may be considered injective, i.e. \
+   if `f t₁ … tₙ ≡ f u₁ … uₙ` then `t₁ ≡ u₁`, …, `tₙ ≡ uₙ`. The \
+   verification is left to the user.";
+  "commutative",
+  "Property modifier: adds the equation `f t u ≡ f u t` to the \
+   conversion.";
+  "associative",
+  "Property modifier: adds the equation `f (f t u) v ≡ f t (f u v)` \
+   to the conversion (in conjunction with `commutative` only); \
+   `left`/`right` selects the canonical form.";
+  "private",
+  "Exposition modifier: the symbol cannot be used outside the module \
+   where it is defined.";
+  "protected",
+  "Exposition modifier: outside its module, the symbol can only be \
+   used in the left-hand side of rewriting rules.";
+  "sequential",
+  "Matching strategy modifier: apply the symbol's rules in \
+   declaration order instead of the default order-independent \
+   strategy. Warning: this can break important properties.";
+]
+
+let keyword_doc (name : string) : string option =
+  List.assoc_opt name keyword_docs
+
+(** Hypotheses visible at the cursor inside a proof. Returns the
+    focused goal's [(name, type_string)] list, or [[]] when no goal
+    is active at that position. Goal printing prefixes hypothesis
+    types with ": "; strip it so consumers get the bare type, in line
+    with symbol hovers. *)
+let hyps_at_cursor (doc : Lp_doc.t) line character : (string * string) list =
+  match get_node_at_pos doc line character with
+  | None -> []
+  | Some n ->
+    let strip_type t =
+      let t = String.trim t in
+      if String.length t > 0 && t.[0] = ':' then
+        String.trim (String.sub t 1 (String.length t - 1))
+      else t
+    in
+    let hyps_at p =
+      match closest_before p n.Lp_doc.goals with
+      | Some ((hyps, _) :: _, _) ->
+        Some (List.map (fun (hn, ht) -> (hn, strip_type ht)) hyps)
+      | _ -> None
+    in
+    (* Goal snapshots are recorded after each tactic, so the snapshot
+       at the exact cursor may be past the tactic that finished the
+       proof (no goals, hence no hypotheses). The state at the start
+       of the line — before the current tactic ran — is the useful
+       context then. *)
+    match hyps_at (line + 1, character) with
+    | Some hyps -> hyps
+    | None -> Option.get [] (hyps_at (line + 1, 0))
 
 (** [get_first_error doc] returns the first error inferred from doc.logs *)
 let get_first_error doc =
@@ -313,23 +782,47 @@ let do_definition ofmt ~id params =
 
     (* Lines sent by the client start at 0 *)
     let pt = Range.make_point (ln + 1) pos in
+    (* Ghost symbols (internal symbols used e.g. for unification rules
+       and string literals) have no user-facing definition site one
+       could jump to. *)
+    let definfo_of_sym (s : Term.sym) : J.t =
+      if s.Term.sym_path = Sign.Ghost.path then `Null
+      else
+        let file =
+          Library.(file_of_path s.Term.sym_path ^ lp_src_extension) in
+        let pos = Option.get (Pos.file_start file) s.Term.sym_pos in
+        mk_definfo file pos
+    in
+    (* Fallback when the identifier RangeMap has no resolvable entry
+       at the cursor: the module paths of require/open commands (jump
+       to the start of that module's file), then the raw token under
+       the cursor against the in-scope symbol table — the latter also
+       covers regions the checker never reached (mid-edit text, code
+       past a parse error). *)
+    let def_fallback () =
+      match RangeMap.find pt doc.path_map with
+      | Some (_, path) ->
+        let file = Library.(file_of_path path ^ lp_src_extension) in
+        mk_definfo file (Pos.file_start file)
+      | None ->
+        match token_at_pos doc ln pos with
+        | None ->
+          LIO.log_error "do_definition" "no symbol at point"; `Null
+        | Some tok ->
+          match Extra.StrMap.find_opt tok (Pure.get_symbols ss) with
+          | Some s -> definfo_of_sym s
+          | None ->
+            LIO.log_error "do_definition" "no symbol at point"; `Null
+    in
     let sym_info =
       match get_symbol pt doc.map with
-      | None ->
-        LIO.log_error "do_definition" "no symbol at point"; `Null
       | Some (qid, _) ->
         LIO.log_error "do_definition" (snd qid);
-        match Pure.find_sym ss qid with
-        | None -> `Null
-        (* Ghost symbols (internal symbols used e.g. for unification
-           rules and string literals) have no user-facing definition
-           site one could jump to. *)
-        | Some s when s.Term.sym_path = Sign.Ghost.path -> `Null
-        | Some s ->
-          let file =
-            Library.(file_of_path s.Term.sym_path ^ lp_src_extension) in
-          let pos = Option.get (Pos.file_start file) s.sym_pos in
-          mk_definfo file pos
+        (match Pure.find_sym ss qid with
+         | Some s -> definfo_of_sym s
+         | None when fst qid = [] -> def_fallback ()
+         | None -> `Null)
+      | None -> def_fallback ()
     in
     let msg = LSP.mk_reply ~id ~result:sym_info in
     LIO.send_json ofmt msg
@@ -352,19 +845,184 @@ let hover_symInfo ofmt ~id params =
                                    was never successfully loaded") in
     Pure.restore_time ss;
 
-    match get_symbol pt doc.map with
-    | None -> send_null ()
-    | Some (qid, range) ->
-      match Pure.find_sym ss qid with
+    let send_type_hover ?range sym =
+      let sym_type = Format.asprintf "%a" Core.Print.sym_type sym in
+      let fields = ["contents", `String sym_type] in
+      let fields = match range with
+        | Some r -> fields @ ["range", LSP.mk_range_of_interval r]
+        | None -> fields
+      in
+      LIO.send_json ofmt (LSP.mk_reply ~id ~result:(`Assoc fields))
+    in
+    let send_contents s =
+      LIO.send_json ofmt
+        (LSP.mk_reply ~id ~result:(`Assoc ["contents", `String s]))
+    in
+    (* Token-based fallback, tried when the identifier RangeMap has no
+       resolvable entry at the cursor: tactic keywords (inside proofs)
+       and hypotheses of the focused goal, then command keywords and
+       modifiers, then in-scope symbols. Text-based, so it also covers
+       regions the checker never reached (mid-edit text, code past a
+       parse error). *)
+    let hover_fallback () =
+      match token_at_pos doc ln pos with
       | None -> send_null ()
-      | Some sym_found ->
-        let sym_type = Format.asprintf "%a" Core.Print.sym_type sym_found in
-        let result = `Assoc [ "contents", `String sym_type
-                            ; "range", LSP.mk_range_of_interval range ] in
-        LIO.send_json ofmt (LSP.mk_reply ~id ~result)
+      | Some tok ->
+        let in_proof = in_proof_at doc ln pos in
+        match (if in_proof then tactic_doc tok else None) with
+        | Some d -> send_contents d
+        | None ->
+          match
+            (if in_proof then
+               List.assoc_opt tok (hyps_at_cursor doc ln pos)
+             else None)
+          with
+          | Some htype -> send_contents htype
+          | None ->
+            match keyword_doc tok with
+            | Some d -> send_contents d
+            | None ->
+              match Extra.StrMap.find_opt tok (Pure.get_symbols ss) with
+              | Some sym when sym.Term.sym_path <> Sign.Ghost.path ->
+                send_type_hover sym
+              | _ -> send_null ()
+    in
+    match get_symbol pt doc.map with
+    | Some (qid, range) ->
+      (match Pure.find_sym ss qid with
+       | Some sym -> send_type_hover ~range sym
+       (* Unresolvable unqualified identifier: typically a proof-local
+          name (hypothesis) — try the fallback chain. *)
+       | None when fst qid = [] -> hover_fallback ()
+       | None -> send_null ())
+    | None -> hover_fallback ()
   with e ->
     LIO.log_error "hover_symInfo" (Printexc.to_string e);
     send_null ()
+
+(* --- Completion ------------------------------------------------------- *)
+
+(** CompletionItemKind for a declared symbol: Function (3) if the
+    symbol computes — it has a definition or rewrite rules — and
+    Constant (21) otherwise (constructors, axioms, type formers).
+    The symbol's type deliberately plays no part: a type that is not
+    syntactically a product may still normalize to one, so any
+    classification from the type's surface shape would lie. *)
+let completion_kind (s : Term.sym) =
+  let open Term in
+  let open Timed in
+  if Option.is_None !(s.sym_def) && !(s.sym_rules) = [] then 21
+  else 3
+
+let do_completion ofmt ~id params =
+  let uri, line, character = get_docTextPosition params in
+  let empty = `Assoc ["isIncomplete", `Bool false; "items", `List []] in
+  match Hashtbl.find_opt completed_table uri with
+  | None -> LIO.send_json ofmt (LSP.mk_reply ~id ~result:empty)
+  | Some doc ->
+    match doc.Lp_doc.final with
+    | None -> LIO.send_json ofmt (LSP.mk_reply ~id ~result:empty)
+    | Some ss ->
+      (* [completion_kind] reads timed refs ([sym_def], [sym_rules]);
+         restore this document's time so we don't observe another open
+         document's state. *)
+      Pure.restore_time ss;
+      let syms = Pure.get_symbols ss in
+      let in_proof = in_proof_at doc line character in
+      (* Symbols. `detail` is filled in on [completionItem/resolve];
+         [data] carries what resolve needs to find the symbol again. *)
+      let symbol_items =
+        Extra.StrMap.fold (fun name s acc ->
+          (* Ghost symbols (internal, e.g. for unification rules) are
+             not part of the user-facing scope. Inside a proof, tactic
+             keywords shadow symbols of the same name in the completion
+             list: the user almost certainly means the tactic. *)
+          if s.Term.sym_path = Sign.Ghost.path
+          || (in_proof && is_tactic_name name) then acc
+          else
+            `Assoc [
+              "label", `String name;
+              "kind",  `Int (completion_kind s);
+              "data",  `Assoc [ "kind", `String "symbol"
+                              ; "uri",  `String uri ];
+            ] :: acc
+        ) syms [] in
+      (* Tactic keywords, with snippet insertions when supported. *)
+      let tactic_items =
+        if not in_proof then [] else
+          List.map (fun (name, detail, doc, snippet) ->
+            let doc_field =
+              if !markdown_completion_docs then
+                `Assoc [ "kind", `String "markdown"
+                       ; "value", `String doc ]
+              else `String doc
+            in
+            let base = [
+              "label", `String name;
+              "kind",  `Int 14;                 (* Keyword *)
+              "detail", `String detail;
+              "documentation", doc_field;
+              "sortText", `String ("0" ^ name);
+            ] in
+            `Assoc (
+              if !snippet_support then
+                base @
+                [ "insertText", `String snippet
+                ; "insertTextFormat", `Int 2 ]  (* Snippet *)
+              else base)
+          ) tactic_completions in
+      (* Hypotheses of the focused goal. *)
+      let hyp_items =
+        if not in_proof then [] else
+          List.map (fun (hname, htype) ->
+            `Assoc [
+              "label", `String hname;
+              "kind",  `Int 6;                  (* Variable *)
+              "detail", `String htype;
+              "sortText", `String ("1" ^ hname);
+            ]
+          ) (hyps_at_cursor doc line character) in
+      let result = `Assoc [
+        "isIncomplete", `Bool false;
+        "items", `List (symbol_items @ tactic_items @ hyp_items);
+      ] in
+      LIO.send_json ofmt (LSP.mk_reply ~id ~result)
+
+(** Attach [detail] (and eventually other fields) to the completion
+    item the client highlighted. The initial completion response is
+    kept light by omitting per-symbol type strings; they're
+    pretty-printed here, lazily, once per highlighted item. *)
+let do_completion_resolve ofmt ~id params =
+  let echo () =
+    LIO.send_json ofmt (LSP.mk_reply ~id ~result:(`Assoc params))
+  in
+  match List.assoc_opt "data" params with
+  | Some (`Assoc data) ->
+    (match List.assoc_opt "kind" data with
+     | Some (`String "symbol") ->
+       let uri = try string_field "uri" data with _ -> "" in
+       (* Items are generated from the in-scope symbol map, keyed by
+          the label; resolve the highlighted item from the same map. *)
+       let label = try string_field "label" params with _ -> "" in
+       (match Hashtbl.find_opt completed_table uri with
+        | None -> echo ()
+        | Some doc ->
+          match doc.Lp_doc.final with
+          | None -> echo ()
+          | Some ss ->
+            Pure.set_print_state ss;
+            (match Extra.StrMap.find_opt label (Pure.get_symbols ss) with
+             | None -> echo ()
+             | Some sym ->
+               let type_str =
+                 Format.asprintf "%a" Core.Print.sym_type sym in
+               let fields =
+                 ("detail", `String type_str) ::
+                 List.remove_assoc "detail" params in
+               LIO.send_json ofmt
+                 (LSP.mk_reply ~id ~result:(`Assoc fields))))
+     | _ -> echo ())
+  | _ -> echo ()
 
 let protect_dispatch p f x =
   try f x
@@ -403,6 +1061,17 @@ let dispatch_message ofmt dict =
     (try do_definition ofmt ~id params
      with _ -> LIO.send_json ofmt (LSP.mk_reply ~id ~result:`Null))
 
+  | "textDocument/completion" ->
+    (try do_completion ofmt ~id params
+     with _ ->
+       let empty = `Assoc ["isIncomplete", `Bool false; "items", `List []] in
+       LIO.send_json ofmt (LSP.mk_reply ~id ~result:empty))
+
+  | "completionItem/resolve" ->
+    (try do_completion_resolve ofmt ~id params
+     with _ ->
+       LIO.send_json ofmt (LSP.mk_reply ~id ~result:(`Assoc params)))
+
   | "proof/goals" ->
     do_goals ofmt ~id params
 
@@ -423,11 +1092,18 @@ let dispatch_message ofmt dict =
     exit 0
 
   (* NOOPs *)
-  | "initialized"
-  | "workspace/didChangeWatchedModule" ->
+  | "initialized" ->
     ()
   | msg ->
-    LIO.log_error "no_handler" msg
+    (* Requests carry an id; notifications don't. For requests we must
+       reply with JSON-RPC MethodNotFound so the client doesn't wait
+       forever. Notifications get logged and dropped, matching the
+       spec's "no response" rule. *)
+    LIO.log_error "no_handler" msg;
+    if List.mem_assoc "id" dict then
+      LIO.send_json ofmt
+        (LSP.mk_error_reply ~id ~code:(-32601)
+           ~msg:("Method not found: " ^ msg))
 
 let process_input ofmt (com : J.t) =
   try dispatch_message ofmt (U.to_assoc com)
@@ -438,12 +1114,13 @@ let process_input ofmt (com : J.t) =
     let bt = Printexc.get_backtrace () in
     LIO.log_error "[BT]" bt;
     LIO.log_error "process_input" (Printexc.to_string exn);
-    (* Send a null reply so the client doesn't hang *)
-    let id = oint_field "id" (U.to_assoc com) in
-    if id <> 0 then begin
-      let msg = LSP.mk_reply ~id ~result:`Null in
-      LIO.send_json ofmt msg
-    end
+    (* Send a null reply so the client doesn't hang. Requests carry an
+       "id" field; note that id 0 is a valid request id (Zed numbers
+       its first request 0), so key on the field's presence. *)
+    let dict = U.to_assoc com in
+    if List.mem_assoc "id" dict then
+      let id = oint_field "id" dict in
+      LIO.send_json ofmt (LSP.mk_reply ~id ~result:`Null)
 
 let main std log_file =
 
@@ -467,7 +1144,6 @@ let main std log_file =
     LIO.log_object "read" com;
     process_input oc com;
     F.pp_print_flush lp_fmt ();
-    (* flush lp_oc ;*)
     loop ()
   in
   try loop ()
