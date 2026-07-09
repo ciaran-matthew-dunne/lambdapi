@@ -850,7 +850,9 @@ let keyword_completions : (string * string * string * string) list = [
   "notation", "set a symbol's notation",
   "Sets the notation of a symbol: `infix`/`prefix`/`postfix` with an \
    optional priority, or `quantifier`.",
-  "notation ${1:id} infix ${2:priority};";
+  (* The notation kind is completed contextually after the id, so
+     the snippet does not presume one. *)
+  "notation ${1:id} $0";
 
   "opaque", "never unfold the definition",
   "The symbol is never reduced to its definition (typical for \
@@ -1385,14 +1387,18 @@ let do_completion ofmt ~id params =
            keywords and modifiers outside. Queries are valid in both
            contexts. *)
         let keyword_items =
-          if in_proof then
+          match ctx with
+          (* The argument of a tactic is a term position: keywords
+             are not valid there. *)
+          | Ctx_tactic_arg -> []
+          | _ when in_proof ->
             mk_keyword_items "0" tactic_completions
             @ mk_keyword_items "2" (query_completions
                                     @ proof_end_completions)
-          else
+          | _ ->
             mk_keyword_items "0" keyword_completions
             @ mk_keyword_items "2" query_completions in
-        (* Hypotheses of the focused goal, ranked before the tactics
+        (* Hypotheses of the focused goal, ranked before the symbols
            in the argument position of a hypothesis-taking tactic. *)
         let hyp_rank =
           match ctx with Ctx_tactic_arg -> "0" | _ -> "1" in

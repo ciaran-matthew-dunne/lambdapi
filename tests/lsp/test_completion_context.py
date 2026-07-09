@@ -196,6 +196,26 @@ class TestArgumentContexts(LSPTestCase):
         self.assertTrue(n_item.get("sortText", "").startswith("0"),
             f"hypothesis should rank first after `apply`; got {n_item!r}")
 
+    def test_no_keywords_in_tactic_args(self):
+        """The argument of a tactic is a term position: offering
+        `have` (or any keyword) after `apply ` would be invalid."""
+        proof = (
+            "constant symbol Nat : TYPE;\n"
+            "symbol triv : Nat → Nat ≔\n"
+            "begin\n"
+            "  assume n;\n"
+            "  apply n;\n"
+            "end;\n"
+        )
+        uri, _src, _ = self.open_text("arg6.lp", proof)
+        labels = _labels(_complete(self.server, uri, 4, 8))
+        for kw in ("have", "apply", "admitted", "print"):
+            self.assertNotIn(kw, labels,
+                f"{kw!r} is not valid in a tactic argument")
+        self.assertIn("n", labels)
+        self.assertIn("triv", labels,
+            "in-scope symbols are valid tactic arguments")
+
 
 if __name__ == "__main__":
     unittest.main()
