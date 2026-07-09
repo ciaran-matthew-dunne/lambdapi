@@ -375,21 +375,37 @@ let in_range ?loc (line, pos) =
     (compare (start_line, start_col) (line, pos)) *
     (compare (end_line, end_col) (line, pos)) <= 0
 
-let get_node_at_pos doc line pos =
+let find_node_at_pos nodes line pos =
   let open Lp_doc in
   List.find_opt (fun { cmd; _ } ->
       let loc = Pure.Command.get_pos cmd in
       in_range ?loc (line,pos)
-    ) doc.Lp_doc.nodes
+    ) nodes
+
+let get_node_at_pos doc line pos =
+  find_node_at_pos doc.Lp_doc.nodes line pos
 
 (* --- Cursor context: proof scripts, raw tokens, tactic docs -------- *)
+
+(* Like [get_node_at_pos], but falling back to the nodes of the last
+   parse-error-free check. A mid-edit text (a partial tactic name,
+   say) fails to parse, dropping the command being edited from
+   [nodes] — exactly when completion and hover need its proof
+   context. [good_nodes] equals [nodes] whenever the text parses, so
+   the fallback only ever serves stale data while the text is broken;
+   edits happen within a line, so its line-based positions stay valid
+   until the next clean parse. *)
+let get_context_node doc line pos =
+  match get_node_at_pos doc line pos with
+  | Some n -> Some n
+  | None -> find_node_at_pos doc.Lp_doc.good_nodes line pos
 
 (* True iff the command at the cursor carries a proof script. Every
    [P_symbol] node has a goals snapshot (symbol elaboration goes
    through the proof machinery), so a non-empty [goals] field would
    not discriminate. *)
 let in_proof_at (doc : Lp_doc.t) line character : bool =
-  match get_node_at_pos doc line character with
+  match get_context_node doc line character with
   | Some n ->
     (match Pure.Command.get_elt n.Lp_doc.cmd with
      | Parsing.Syntax.P_symbol {p_sym_prf = Some _; _} -> true
@@ -672,7 +688,7 @@ let keyword_doc (name : string) : string option =
     types with ": "; strip it so consumers get the bare type, in line
     with symbol hovers. *)
 let hyps_at_cursor (doc : Lp_doc.t) line character : (string * string) list =
-  match get_node_at_pos doc line character with
+  match get_context_node doc line character with
   | None -> []
   | Some n ->
     let strip_type t =

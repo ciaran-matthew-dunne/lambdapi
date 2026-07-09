@@ -195,5 +195,57 @@ class TestNoSnippetSupport(LSPTestCase):
         self.assertNotIn("insertTextFormat", apply_item)
 
 
+class TestCompletionMidEdit(LSPTestCase):
+    """Typing a partial tactic name breaks the parse of the enclosing
+    command; proof-context completions must survive via the nodes of
+    the last successful parse, and resync on the next clean parse."""
+
+    BROKEN = (
+        "constant symbol Nat : TYPE;\n"
+        "constant symbol zero : Nat;\n"
+        "symbol triv : Nat → Nat ≔\n"
+        "begin\n"
+        "  assume n;\n"
+        "  re\n"                      # mid-word edit: parse error
+        "  refine n;\n"
+        "end;\n"
+    )
+
+    def test_proof_context_survives_broken_parse(self):
+        uri, _src, _ = self.open_text("mid.lp", TestCompletionInProof.PROOF)
+        self.server.did_change(uri, self.BROKEN, 2)
+        notifs = self.server.drain_notifications(timeout=5.0)
+        diags = self.server.extract_diagnostics(notifs, uri=uri)
+        self.assertTrue(self.errors(diags),
+            "the mid-word text should fail to parse")
+        # Cursor right after the "re" being typed (line 5, col 4).
+        r = _completion_request(self.server, uri, 5, 4)
+        labels = {i["label"] for i in r.get("items", [])}
+        self.assertIn("refine", labels,
+            f"tactics must survive a mid-word edit; got {sorted(labels)[:10]}")
+        self.assertIn("n", labels,
+            "hypotheses must survive a mid-word edit")
+        self.assertIn("zero", labels,
+            "symbols checked before the breakage must still be offered")
+
+    def test_context_resyncs_after_clean_parse(self):
+        uri, _src, _ = self.open_text("mid2.lp", TestCompletionInProof.PROOF)
+        self.server.did_change(uri, self.BROKEN, 2)
+        self.server.drain_notifications(timeout=5.0)
+        # Replace the proof by a plain definition: the text parses
+        # again, so the retained proof context must be dropped.
+        flat = (
+            "constant symbol Nat : TYPE;\n"
+            "constant symbol zero : Nat;\n"
+            "symbol triv : Nat → Nat ≔ λ n, n;\n"
+        )
+        self.server.did_change(uri, flat, 3)
+        self.server.drain_notifications(timeout=5.0)
+        r = _completion_request(self.server, uri, 2, 0)
+        labels = {i["label"] for i in r.get("items", [])}
+        self.assertNotIn("refine", labels,
+            "stale proof context must clear after a clean parse")
+
+
 if __name__ == "__main__":
     unittest.main()

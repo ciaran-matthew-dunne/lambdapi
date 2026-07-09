@@ -95,6 +95,40 @@ class TestHoverTacticKeyword(LSPTestCase):
             f"hypothesis `n` has type Nat; got {text!r}")
 
 
+class TestHoverMidEdit(LSPTestCase):
+    """Tactic docs and hypothesis hovers survive a mid-word edit that
+    breaks the parse (served from the last successfully parsed nodes)."""
+
+    def test_tactic_hover_survives_broken_parse(self):
+        proof = TestHoverTacticKeyword.PROOF
+        uri, _src, _ = self.open_text("hovmid.lp", proof)
+        broken = proof.replace("  refine n;\n", "  re\n  refine n;\n")
+        self.server.did_change(uri, broken, 2)
+        self.server.drain_notifications(timeout=5.0)
+        # `assume` on line 4 sits before the edit point, so its stale
+        # position is exact.
+        text = _hover_text(self.server.hover(uri, 4, 3))
+        self.assertIsNotNone(text,
+            "tactic hover should survive a broken parse")
+        self.assertIn("goal", text,
+            f"expected the `assume` documentation; got {text!r}")
+
+    def test_hypothesis_hover_survives_broken_parse(self):
+        proof = TestHoverTacticKeyword.PROOF
+        uri, _src, _ = self.open_text("hovmid2.lp", proof)
+        # Mid-word edit after the refine line: earlier lines (and the
+        # goal snapshots recorded for them) keep their positions.
+        broken = proof.replace("end;\n", "  re\nend;\n")
+        self.server.did_change(uri, broken, 2)
+        self.server.drain_notifications(timeout=5.0)
+        # `n` in the unshifted `refine n;` line (line 5, col 9).
+        text = _hover_text(self.server.hover(uri, 5, 9))
+        self.assertIsNotNone(text,
+            "hypothesis hover should survive a broken parse")
+        self.assertIn("Nat", text,
+            f"hypothesis `n` has type Nat; got {text!r}")
+
+
 class TestHoverCommandKeywords(LSPTestCase):
     """Command keywords and symbol modifiers are documented on hover,
     anywhere in a document."""
