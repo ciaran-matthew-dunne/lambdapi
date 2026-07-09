@@ -227,18 +227,11 @@ let mk_definfo file pos =
     ; "range", LSP.mk_range pos
         ]
 
-let kind_of_type tm =
-  let open Term in
-  let open Timed in
-  let is_undef =
-    Option.is_None !(tm.sym_def) && List.length !(tm.sym_rules) = 0 in
-  match !(tm.sym_type) with
-  | Vari _ ->
-    13                         (* Variable *)
-  | Type | Kind | Symb _ | _ when is_undef ->
-    14                         (* Constant *)
-  | _ ->
-    12                         (* Function *)
+(* No LSP SymbolKind matches lambdapi's notions (axiom, constructor,
+   definable symbol, theorem, …), so we do not classify: every symbol
+   is reported as Function, the least surprising icon. (SymbolKind is
+   a mandatory field; completions simply omit their optional one.) *)
+let symbol_kind = 12                                       (* Function *)
 
 let mk_document_symbol ?(children=[]) ~name ~kind ~range ~selection_range ()
   : J.t =
@@ -270,14 +263,8 @@ let document_symbols_of_nodes (nodes : Lp_doc.doc_node list) : J.t list =
       match Pure.Command.get_elt cmd with
       | P_symbol s ->
         let sel = range_or_fallback s.p_sym_nam.pos cmd_range in
-        (* Mirror the flat mode's Constant/Function distinction as far
-           as the AST can see it: a symbol without [≔] (no definition,
-           no proof) declares an axiom/constructor. Rules added by
-           later commands are not accounted for. *)
-        let kind = if s.p_sym_def then 12 (* Function *)
-                   else 14 (* Constant *) in
         [ mk_document_symbol
-            ~name:s.p_sym_nam.elt ~kind
+            ~name:s.p_sym_nam.elt ~kind:symbol_kind
             ~range:cmd_range ~selection_range:sel () ]
       | P_inductive (_, _, _, inds) ->
         List.map (fun (ind : p_inductive) ->
@@ -318,7 +305,7 @@ let do_symbols ofmt ~id params =
               Option.map_default
                 (fun p ->
                   mk_syminfo file
-                    (s.sym_name, s.sym_path, kind_of_type s, p) :: l)
+                    (s.sym_name, s.sym_path, symbol_kind, p) :: l)
                 l s.sym_pos)
             sym [] in
         `List syms
@@ -966,18 +953,6 @@ let hover_symInfo ofmt ~id params =
 
 (* --- Completion ------------------------------------------------------- *)
 
-(** CompletionItemKind for a declared symbol: Function (3) if the
-    symbol computes — it has a definition or rewrite rules — and
-    Constant (21) otherwise (constructors, axioms, type formers).
-    The symbol's type deliberately plays no part: a type that is not
-    syntactically a product may still normalize to one, so any
-    classification from the type's surface shape would lie. *)
-let completion_kind (s : Term.sym) =
-  let open Term in
-  let open Timed in
-  if Option.is_None !(s.sym_def) && !(s.sym_rules) = [] then 21
-  else 3
-
 let do_completion ofmt ~id params =
   let uri, line, character = get_docTextPosition params in
   let empty = `Assoc ["isIncomplete", `Bool false; "items", `List []] in
@@ -987,14 +962,13 @@ let do_completion ofmt ~id params =
     match doc.Lp_doc.final with
     | None -> LIO.send_json ofmt (LSP.mk_reply ~id ~result:empty)
     | Some ss ->
-      (* [completion_kind] reads timed refs ([sym_def], [sym_rules]);
-         restore this document's time so we don't observe another open
-         document's state. *)
       Pure.restore_time ss;
       let syms = Pure.get_symbols ss in
       let in_proof = in_proof_at doc line character in
-      (* Symbols. `detail` is filled in on [completionItem/resolve];
-         [data] carries what resolve needs to find the symbol again. *)
+      (* Symbols. No [kind]: the LSP completion kinds don't match
+         lambdapi's notions, so we don't force a classification.
+         `detail` is filled in on [completionItem/resolve]; [data]
+         carries what resolve needs to find the symbol again. *)
       let symbol_items =
         Extra.StrMap.fold (fun name s acc ->
           (* Ghost symbols (internal, e.g. for unification rules) are
@@ -1006,7 +980,6 @@ let do_completion ofmt ~id params =
           else
             `Assoc [
               "label", `String name;
-              "kind",  `Int (completion_kind s);
               "data",  `Assoc [ "kind", `String "symbol"
                               ; "uri",  `String uri ];
             ] :: acc

@@ -55,22 +55,16 @@ class TestCompletion(LSPTestCase):
         self.assertIn("Nat", resolved.get("detail", ""),
             f"resolved detail should mention Nat; got {resolved!r}")
 
-    def test_symbol_kinds_reflect_computation(self):
-        """A symbol that computes (has a definition or rewrite rules) is
-        Function (3); everything else — constructors, axioms, type
-        formers — is Constant (21). The type's shape is deliberately
-        not consulted: a type can normalize to a product without being
-        one syntactically."""
+    def test_symbol_items_carry_no_kind(self):
+        """The LSP completion kinds don't match lambdapi's notions
+        (axiom, constructor, definable symbol, …), so symbol items
+        don't claim one."""
         uri, _text, _src, _ = self.open_fixture("simple.lp")
         r = _completion_request(self.server, uri, 5, 0)
-        kinds = {i["label"]: i["kind"] for i in r.get("items", [])}
-        self.assertEqual(kinds.get("double"), 3,  # has rewrite rules
-            f"computing symbol should be Function (3); "
-            f"got {kinds.get('double')}")
-        for label in ("Nat", "zero", "succ"):     # no definition, no rules
-            self.assertEqual(kinds.get(label), 21,
-                f"non-computing symbol {label!r} should be Constant (21); "
-                f"got {kinds.get(label)}")
+        for item in r.get("items", []):
+            if item["label"] in ("Nat", "zero", "succ", "double"):
+                self.assertNotIn("kind", item,
+                    f"symbol items should not be classified; got {item!r}")
 
     def test_no_ghost_symbols_in_completions(self):
         """Internal ghost symbols (unification-rule machinery such as
