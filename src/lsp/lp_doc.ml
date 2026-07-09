@@ -22,7 +22,7 @@ module LSP = Lsp_base
 let lp_logger = Buffer.create 100
 
 type doc_node =
-  { ast   : Pure.Command.t
+  { cmd   : Pure.Command.t
   ; exec  : bool
   (*; tactics : Proof.Tactic.t list*)
   ; goals : (Goal.info list * Pos.popt) list
@@ -55,6 +55,17 @@ let buf_get_and_clear buf =
   let res = Buffer.contents buf in
   Buffer.clear buf; res
 
+(* [at_keyword p kw] is the sub-position of [p] covering only its leading
+   keyword [kw] (keywords are ASCII, so their string length is their width
+   both in columns and in character offsets). *)
+let at_keyword : Pos.popt -> string -> Pos.popt = fun p kw ->
+  match p with
+  | None -> None
+  | Some p ->
+      Pos.(Some { p with end_line = p.start_line
+                       ; end_col = p.start_col + String.length kw
+                       ; end_offset = p.start_offset + String.length kw })
+
 let process_pstep (pstate,diags,logs) tac nb_subproofs =
   let open Pure in
   let tac_loc = Tactic.get_pos tac in
@@ -64,7 +75,14 @@ let process_pstep (pstate,diags,logs) tac nb_subproofs =
   | Tac_OK (pstate, qres) ->
     let goals = Some (current_goals pstate) in
     let qres = match qres with None -> "OK" | Some x -> x in
-    pstate, (tac_loc, 4, qres, goals) :: diags, logs
+    (* Show the success hint on the tactic's leading keyword only. This
+       tuple also anchors the goals panel (see [get_goals]), whose lookup
+       reads the start of the position: the start must not move. *)
+    let hint_loc = match Tactic.keyword tac with
+      | Some kw -> at_keyword tac_loc kw
+      | None -> tac_loc
+    in
+    pstate, (hint_loc, 4, qres, goals) :: diags, logs
   | Tac_Error(loc,msg) ->
     let loc = option_default loc tac_loc in
     let goals = Some (current_goals pstate) in
@@ -84,27 +102,56 @@ let get_goals dg_proof =
   in get_goals_aux [] dg_proof
 (* XXX: Imperative problem *)
 
-let process_cmd _file (nodes,st,dg,logs) ast =
+(* [at_semicolon p] is the position of the ";" terminating a command whose
+   position is [p]. Success ("OK") hints are shown there so that they do
+   not underline the whole command. Position ends are exclusive (as in the
+   LSP ranges they are mapped to), so the position of the one-character
+   ";" ends one column after it. The parser's [extend_pos] ends [p] one
+   character before the ";", except when the ";" is at column 0, where it
+   does not back up over the newline: a ";" at column 0 and one at column
+   1 both yield [end_col = 0] (with [end_offset] the offset of column 0),
+   so in that case the returned position covers both columns. *)
+let at_semicolon : Pos.popt -> Pos.popt = function
+  | None -> None
+  | Some p ->
+      Pos.(
+        if p.end_col = 0 then
+          Some { p with start_line = p.end_line; start_col = 0
+                      ; start_offset = p.end_offset
+                      ; end_col = 2
+                      ; end_offset = p.end_offset + 2 }
+        else
+          Some { p with start_line = p.end_line
+                      ; start_col = p.end_col + 1
+                      ; start_offset = p.end_offset + 1
+                      ; end_col = p.end_col + 2
+                      ; end_offset = p.end_offset + 2 })
+
+let process_cmd _file (nodes,st,dg,logs) cmd =
   let open Pure in
   (* let open Timed in *)
   (* XXX: Capture output *)
   (* Console.out_fmt := lp_fmt;
    * Console.err_fmt := lp_fmt; *)
-  let cmd_loc = Command.get_pos ast in
-  let hndl_cmd_res = handle_command st ast in
+  let cmd_loc = Command.get_pos cmd in
+  let hndl_cmd_res = handle_command st cmd in
   let logs = ((3, buf_get_and_clear lp_logger), cmd_loc) :: logs in
   match hndl_cmd_res with
   | Cmd_OK (st, qres) ->
     let qres = match qres with None -> "OK" | Some x -> x in
-    let nodes = { ast; exec = true; goals = [] } :: nodes in
-    let ok_diag = cmd_loc, 4, qres, None in
+    let nodes = { cmd; exec = true; goals = [] } :: nodes in
+    (* Show the success hint on the terminating ";", not the whole command. *)
+    let ok_diag = at_semicolon cmd_loc, 4, qres, None in
     nodes, st, ok_diag :: dg, logs
   | Cmd_Proof (pst, tlist, thm_loc, qed_loc) ->
     let start_goals = current_goals pst in
     let pst, dg_proof, logs = process_proof pst tlist logs in
-    let dg_proof = (thm_loc, 4, "OK", Some start_goals) :: dg_proof in
-    let goals = get_goals dg_proof in
-    let nodes = { ast; exec = true; goals } :: nodes in
+    (* Initial goals stay anchored at the symbol, for the goals panel. *)
+    let goals =
+      get_goals ((thm_loc, 4, "OK", Some start_goals) :: dg_proof) in
+    let nodes = { cmd; exec = true; goals } :: nodes in
+    (* Visible success hint on the terminating ";", not on the symbol name. *)
+    let dg_proof = (at_semicolon cmd_loc, 4, "OK", None) :: dg_proof in
     let st, dg_proof, logs =
       match end_proof pst with
       | Cmd_OK (st, qres)   ->
@@ -124,7 +171,7 @@ let process_cmd _file (nodes,st,dg,logs) ast =
     nodes, st, dg_proof @ dg, logs
 
   | Cmd_Error(loc, msg) ->
-    let nodes = { ast; exec = false; goals = [] } :: nodes in
+    let nodes = { cmd; exec = false; goals = [] } :: nodes in
     let cmd_loc, loc, diag, log = match cmd_loc, loc with
     | Some l, Some Some l' ->
         if l.fname = l'.fname then

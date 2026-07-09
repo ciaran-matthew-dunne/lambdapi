@@ -27,6 +27,8 @@ module Tactic : sig
   type t
   val equal : t -> t -> bool
   val get_pos : t -> Pos.popt
+  val keyword : t -> string option
+  (** Keyword introducing the tactic, if a single keyword does. *)
   val print : t Base.pp [@@ocaml.toplevel_printer]
 end
 

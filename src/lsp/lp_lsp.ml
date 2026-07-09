@@ -264,12 +264,12 @@ let document_symbols_of_nodes (nodes : Lp_doc.doc_node list) : J.t list =
   in
   (* [nodes] is stored in reverse (head = most recent); restore
      top-to-bottom order for the outline. *)
-  List.concat_map (fun ({ ast; _ } : Lp_doc.doc_node) ->
-    match Pure.Command.get_pos ast with
+  List.concat_map (fun ({ cmd; _ } : Lp_doc.doc_node) ->
+    match Pure.Command.get_pos cmd with
     | None -> []
     | Some cmd_pos ->
       let cmd_range = LSP.mk_range cmd_pos in
-      match Pure.Command.get_elt ast with
+      match Pure.Command.get_elt cmd with
       | P_symbol s ->
         let sel = range_or_fallback s.p_sym_nam.pos cmd_range in
         [ mk_document_symbol
@@ -377,8 +377,8 @@ let in_range ?loc (line, pos) =
 
 let get_node_at_pos doc line pos =
   let open Lp_doc in
-  List.find_opt (fun { ast; _ } ->
-      let loc = Pure.Command.get_pos ast in
+  List.find_opt (fun { cmd; _ } ->
+      let loc = Pure.Command.get_pos cmd in
       in_range ?loc (line,pos)
     ) doc.Lp_doc.nodes
 
@@ -391,7 +391,7 @@ let get_node_at_pos doc line pos =
 let in_proof_at (doc : Lp_doc.t) line character : bool =
   match get_node_at_pos doc line character with
   | Some n ->
-    (match Pure.Command.get_elt n.Lp_doc.ast with
+    (match Pure.Command.get_elt n.Lp_doc.cmd with
      | Parsing.Syntax.P_symbol {p_sym_prf = Some _; _} -> true
      | _ -> false)
   | None -> false
