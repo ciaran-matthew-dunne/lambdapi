@@ -142,5 +142,60 @@ class TestDotTrigger(LSPTestCase):
         self.assertIn("double", _labels(r))
 
 
+class TestArgumentContexts(LSPTestCase):
+    """Focused completions in argument positions: notation kinds,
+    associativity sides, flag names and switches; hypotheses ranked
+    first in hypothesis-taking tactic arguments."""
+
+    def test_notation_arguments(self):
+        uri, _src, _ = self.open_text("arg1.lp",
+            "constant symbol Nat : TYPE;\nnotation Nat \n")
+        labels = _labels(_complete(self.server, uri, 1, 13))
+        for kw in ("infix", "prefix", "postfix", "quantifier"):
+            self.assertIn(kw, labels,
+                f"{kw!r} should be offered after `notation <id>`")
+        self.assertNotIn("Nat", labels,
+            "the notation-argument list should not offer symbols")
+
+    def test_associativity_sides(self):
+        uri, _src, _ = self.open_text("arg2.lp",
+            "constant symbol Nat : TYPE;\nnotation Nat infix \n")
+        labels = _labels(_complete(self.server, uri, 1, 19))
+        self.assertIn("left", labels)
+        self.assertIn("right", labels)
+        self.assertNotIn("infix", labels)
+
+    def test_flag_names(self):
+        uri, _src, _ = self.open_text("arg3.lp", 'flag "\n')
+        labels = _labels(_complete(self.server, uri, 0, 6))
+        self.assertIn("print_implicits", labels,
+            f"registered flags should be offered; got {sorted(labels)}")
+        self.assertIn("eta_equality", labels)
+
+    def test_flag_switch(self):
+        uri, _src, _ = self.open_text("arg4.lp",
+            'flag "print_implicits" \n')
+        labels = _labels(_complete(self.server, uri, 0, 23))
+        self.assertEqual(labels, {"on", "off"},
+            f"after the flag string, only on/off; got {sorted(labels)}")
+
+    def test_hypotheses_ranked_first_in_tactic_args(self):
+        proof = (
+            "constant symbol Nat : TYPE;\n"
+            "symbol triv : Nat → Nat ≔\n"
+            "begin\n"
+            "  assume n;\n"
+            "  apply n;\n"
+            "end;\n"
+        )
+        uri, _src, _ = self.open_text("arg5.lp", proof)
+        # Cursor after "  apply " (line 4, col 8).
+        r = _complete(self.server, uri, 4, 8)
+        n_item = next(i for i in r.get("items", [])
+                      if i["label"] == "n")
+        self.assertTrue(n_item.get("sortText", "").startswith("0"),
+            f"hypothesis should rank first after `apply`; got {n_item!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

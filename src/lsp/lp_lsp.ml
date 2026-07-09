@@ -478,7 +478,16 @@ type completion_context =
   | Ctx_qualified of string * string
     (** Dotted token before the cursor: the module part (before the
         last dot) and the partial name after it. *)
+  | Ctx_notation_arg    (** After [notation <id>]. *)
+  | Ctx_assoc_side      (** After [associative] or [infix]. *)
+  | Ctx_flag_name       (** Inside the string argument of [flag]. *)
+  | Ctx_switch          (** After the string argument of [flag]. *)
+  | Ctx_tactic_arg
+    (** Argument of a tactic that names existing hypotheses. *)
   | Ctx_default
+
+(* Tactics whose argument commonly mentions hypotheses. *)
+let arg_tactics = ["apply"; "refine"; "rewrite"; "remove"; "generalize"]
 
 (* [qualified_of partial] splits the dotted token ending [partial] at
    its last dot: [Some ("Stdlib.Nat", "ze")] for ["(Stdlib.Nat.ze"].
@@ -509,13 +518,26 @@ let completion_context (doc : Lp_doc.t) line col : completion_context =
                   || (w <> "as" && not (String.contains w ';')))
         ws
     in
+    let quotes =
+      String.fold_left
+        (fun n c -> if c = '"' then n + 1 else n) 0 prefix
+    in
     match words with
     | ("require" | "open") :: rest when path_words rest ->
       Ctx_require (partial, col - cp_len partial)
+    | ["notation"; _] when quotes = 0 -> Ctx_notation_arg
+    | "flag" :: _ when quotes = 1 -> Ctx_flag_name
+    | "flag" :: _ when quotes = 2 -> Ctx_switch
     | _ ->
       match qualified_of partial with
       | Some (mpath, name) -> Ctx_qualified (mpath, name)
-      | None -> Ctx_default
+      | None ->
+        match List.rev words with
+        | ("associative" | "infix") :: _ -> Ctx_assoc_side
+        | _ ->
+          match words with
+          | t :: _ when List.mem t arg_tactics -> Ctx_tactic_arg
+          | _ -> Ctx_default
 
 (* Module paths under the current library mappings (the workspace
    package and every map-dir), found by scanning the mapped
@@ -1261,6 +1283,48 @@ let mk_keyword_items (sort_prefix : string)
       else base)
   ) entries
 
+(* Argument keywords of the [notation] command. *)
+let notation_arg_completions : (string * string * string * string) list = [
+  "infix", "infix notation",
+  "`notation f infix [left|right] p;` sets an infix notation for \
+   `f` with priority `p`, optionally left/right associative.",
+  "infix ${1:priority}";
+
+  "prefix", "prefix notation",
+  "`notation f prefix p;` sets a prefix notation for `f` with \
+   priority `p`.",
+  "prefix ${1:priority}";
+
+  "postfix", "postfix notation",
+  "`notation f postfix p;` sets a postfix notation for `f` with \
+   priority `p`.",
+  "postfix ${1:priority}";
+
+  "quantifier", "binder notation",
+  "`notation f quantifier;` allows writing `` `f x, t`` for \
+   `f (λ x, t)`.",
+  "quantifier";
+]
+
+(* Associativity sides, after [associative] or [infix]. *)
+let assoc_side_completions : (string * string * string * string) list = [
+  "left", "left associative", "Selects left associativity.", "left";
+  "right", "right associative", "Selects right associativity.", "right";
+]
+
+(* The switch argument of [flag "..."]. *)
+let switch_completions : (string * string * string * string) list = [
+  "on", "enable the flag", "Turns the flag on.", "on";
+  "off", "disable the flag", "Turns the flag off.", "off";
+]
+
+(* Names of the registered boolean flags, offered inside the string
+   argument of [flag]. *)
+let flag_name_items () : J.t list =
+  Extra.StrMap.fold
+    (fun name _ acc -> `Assoc ["label", `String name] :: acc)
+    Stdlib.(!Console.boolean_flags) []
+
 let do_completion ofmt ~id params =
   let uri, line, character = get_docTextPosition params in
   let empty = `Assoc ["isIncomplete", `Bool false; "items", `List []] in
@@ -1281,14 +1345,21 @@ let do_completion ofmt ~id params =
         | Some (`Int 2) -> true
         | _ -> false
       in
-      match completion_context doc line character with
+      let ctx = completion_context doc line character in
+      match ctx with
       | Ctx_require (partial, start_col) ->
         reply (mk_module_path_items ~line ~start_col
                  ~cursor_col:character partial)
       | Ctx_qualified (mpath, _) ->
         reply (mk_qualified_items ss uri mpath)
-      | Ctx_default when dot_triggered -> reply []
-      | Ctx_default ->
+      | Ctx_notation_arg ->
+        reply (mk_keyword_items "0" notation_arg_completions)
+      | Ctx_assoc_side ->
+        reply (mk_keyword_items "0" assoc_side_completions)
+      | Ctx_switch -> reply (mk_keyword_items "0" switch_completions)
+      | Ctx_flag_name -> reply (flag_name_items ())
+      | (Ctx_default | Ctx_tactic_arg) when dot_triggered -> reply []
+      | Ctx_default | Ctx_tactic_arg ->
         let syms = Pure.get_symbols ss in
         let in_proof = in_proof_at doc line character in
         (* Symbols. No [kind]: the LSP completion kinds don't match
@@ -1321,7 +1392,10 @@ let do_completion ofmt ~id params =
           else
             mk_keyword_items "0" keyword_completions
             @ mk_keyword_items "2" query_completions in
-        (* Hypotheses of the focused goal. *)
+        (* Hypotheses of the focused goal, ranked before the tactics
+           in the argument position of a hypothesis-taking tactic. *)
+        let hyp_rank =
+          match ctx with Ctx_tactic_arg -> "0" | _ -> "1" in
         let hyp_items =
           if not in_proof then [] else
             List.map (fun (hname, htype) ->
@@ -1329,7 +1403,7 @@ let do_completion ofmt ~id params =
                 "label", `String hname;
                 "kind",  `Int 6;                  (* Variable *)
                 "detail", `String htype;
-                "sortText", `String ("1" ^ hname);
+                "sortText", `String (hyp_rank ^ hname);
               ]
             ) (hyps_at_cursor doc line character) in
         let result = `Assoc [
