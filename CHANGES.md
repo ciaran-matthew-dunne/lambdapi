@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Export to Lean.
 - Tactic `all_hyps t` calls parameterized tactic term t on all hypotheses ignoring failing calls.
 - LSP server: completion (in-scope symbols; command keywords with snippets; inside proofs, documented tactic keywords and the local symbols introduced by `assume`), documentation on hover for tactics, command keywords and modifiers, hover on `assume`-introduced local symbols showing their types, hierarchical document symbols, go-to-definition on `require`/`open` module paths, hover/go-to-definition fallback to in-scope symbols in unchecked regions, and an integration test suite (`make test_lsp`).
+- LSP server: context-aware completion, with `.` as a trigger character: module paths after `require`/`open`, qualified identifiers (symbols of the required module, resolving `require as` aliases), notation/associativity/flag arguments, and hypothesis-first ranking in the argument of `apply`, `rewrite`, etc.
 
 ### Changed
 
