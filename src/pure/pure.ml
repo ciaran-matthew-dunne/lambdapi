@@ -23,6 +23,7 @@ module Command = struct
   let equal_with_pos = (=)
   let get_pos c = Pos.(c.pos)
   let get_elt (c : t) : Syntax.p_command_aux = c.Pos.elt
+  let keyword_pos = Syntax.command_keyword_pos
   let print = Util.located Pretty.command
 end
 
@@ -58,7 +59,7 @@ module Tactic = struct
   type t = Syntax.p_tactic
   let equal = Syntax.eq_p_tactic
   let get_pos t = Pos.(t.pos)
-  let keyword = Syntax.tactic_keyword
+  let keyword_pos = Syntax.tactic_keyword_pos
   let print = Util.located Pretty.tactic
 end
 

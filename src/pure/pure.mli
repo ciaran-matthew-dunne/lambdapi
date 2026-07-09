@@ -13,6 +13,10 @@ module Command : sig
   val get_elt : t -> Parsing.Syntax.p_command_aux
   (** Expose the parser-level command shape so clients (LSP, MCP, …)
       can pattern-match on declaration forms (e.g. to build outlines). *)
+  val keyword_pos : t -> Pos.popt
+  (** Position of the keyword introducing the command ("symbol", "rule",
+      "require", …), which is not always at its start: modifiers or
+      parameters may precede it. *)
   val print : t Base.pp [@@ocaml.toplevel_printer]
 end
 
@@ -27,8 +31,9 @@ module Tactic : sig
   type t
   val equal : t -> t -> bool
   val get_pos : t -> Pos.popt
-  val keyword : t -> string option
-  (** Keyword introducing the tactic, if a single keyword does. *)
+  val keyword_pos : t -> Pos.popt
+  (** Position of the keyword introducing the tactic, or of the whole
+      tactic when no single keyword does. *)
   val print : t Base.pp [@@ocaml.toplevel_printer]
 end
 

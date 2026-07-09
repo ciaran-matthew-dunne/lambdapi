@@ -275,7 +275,7 @@ let document_symbols_of_nodes (nodes : Lp_doc.doc_node list) : J.t list =
         [ mk_document_symbol
             ~name:s.p_sym_nam.elt ~kind:12   (* Function *)
             ~range:cmd_range ~selection_range:sel () ]
-      | P_inductive (_, _, inds) ->
+      | P_inductive (_, _, _, inds) ->
         List.map (fun (ind : p_inductive) ->
           let (iname, _, cons) = ind.Pos.elt in
           let ind_range = range_or_fallback ind.Pos.pos cmd_range in

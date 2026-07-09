@@ -433,14 +433,24 @@ let term_id (lb:'token lexbuf): p_term =
 
 (* commands *)
 
-let open_ (priv:bool) (lb:'token lexbuf) : p_command_aux =
+(* [kw_pos] is the position of the "require" keyword when the command was
+   introduced by one; otherwise the position of the "open" keyword is
+   recorded (a "private" modifier, like modifiers of symbol declarations,
+   is not part of the keyword). *)
+let open_ (kw_pos:Pos.popt) (priv:bool) (lb:'token lexbuf) : p_command_aux =
  if log_enabled() then log "%s" __FUNCTION__;
+ let kw_pos =
+   match kw_pos with
+   | None -> Some(locate (current_pos lb))
+   | Some _ -> kw_pos
+ in
  consume OPEN lb;
  let ps = nelist path_tks path lb in
- P_require(Some priv,ps)
+ P_require(kw_pos,Some priv,ps)
 
 let rec symbol (p_sym_mod:p_modifier list) (lb:'token lexbuf): p_command_aux =
  if log_enabled() then log "%s" __FUNCTION__;
+ let p_sym_kw = Some(locate (current_pos lb)) in
  consume SYMBOL lb;
  let p_sym_nam = uid lb in
  let p_sym_arg = list params_tks params lb in
@@ -456,7 +466,7 @@ let rec symbol (p_sym_mod:p_modifier list) (lb:'token lexbuf): p_command_aux =
              let p_sym_prf = Some (proof lb) in
              let p_sym_def = false in
              let sym =
-               {p_sym_mod; p_sym_nam; p_sym_arg; p_sym_typ;
+               {p_sym_mod; p_sym_kw; p_sym_nam; p_sym_arg; p_sym_typ;
                 p_sym_trm=None; p_sym_def; p_sym_prf}
              in P_symbol(sym)
          | ASSIGN ->
@@ -464,7 +474,7 @@ let rec symbol (p_sym_mod:p_modifier list) (lb:'token lexbuf): p_command_aux =
              let p_sym_trm, p_sym_prf = term_proof lb in
              let p_sym_def = true in
              let sym =
-               {p_sym_mod; p_sym_nam; p_sym_arg; p_sym_typ;
+               {p_sym_mod; p_sym_kw; p_sym_nam; p_sym_arg; p_sym_typ;
                 p_sym_trm; p_sym_def; p_sym_prf}
              in P_symbol(sym)
          | SEMICOLON ->
@@ -472,7 +482,7 @@ let rec symbol (p_sym_mod:p_modifier list) (lb:'token lexbuf): p_command_aux =
              let p_sym_def = false in
              let p_sym_prf = None in
              let sym =
-               {p_sym_mod; p_sym_nam; p_sym_arg; p_sym_typ;
+               {p_sym_mod; p_sym_kw; p_sym_nam; p_sym_arg; p_sym_typ;
                 p_sym_trm; p_sym_def; p_sym_prf}
              in P_symbol(sym)
          | _ ->
@@ -484,7 +494,7 @@ let rec symbol (p_sym_mod:p_modifier list) (lb:'token lexbuf): p_command_aux =
        let p_sym_def = true in
        let p_sym_typ = None in
        let sym =
-         {p_sym_mod; p_sym_nam; p_sym_arg; p_sym_typ;
+         {p_sym_mod; p_sym_kw; p_sym_nam; p_sym_arg; p_sym_typ;
           p_sym_trm; p_sym_def; p_sym_prf}
        in P_symbol(sym)
    | _ ->
@@ -497,10 +507,11 @@ and inductive_cmd (p_sym_mod:p_modifier list) (lb:'token lexbuf)
  let xs = list params_tks params lb in
  match current_token lb with
  | INDUCTIVE ->
+     let kw_pos = Some(locate (current_pos lb)) in
      consume INDUCTIVE lb;
      let i = inductive lb in
      let is = list [WITH] (prefix WITH inductive) lb in
-     P_inductive(p_sym_mod,xs,i::is)
+     P_inductive(kw_pos,p_sym_mod,xs,i::is)
  | _ -> expected lb "" [L_PAREN;L_SQ_BRACKET;INDUCTIVE]
 
 and command (lb:'token lexbuf) : p_command =
@@ -520,7 +531,7 @@ and command (lb:'token lexbuf) : p_command =
     end
  | [{elt=P_expo Term.Privat;_}] ->
     begin match current_token lb with
-    | OPEN -> extend_pos lb (*__FUNCTION__*) pos1 (open_ true lb)
+    | OPEN -> extend_pos lb (*__FUNCTION__*) pos1 (open_ None true lb)
     | SYMBOL ->
         extend_pos lb (*__FUNCTION__*) pos1 (symbol p_sym_mod lb)
     | L_PAREN
@@ -542,14 +553,15 @@ and command (lb:'token lexbuf) : p_command =
  | [] ->
     begin match current_token lb with
     | REQUIRE ->
+        let require_pos = Some(locate pos1) in
         consume_token lb;
         begin
           match current_token lb with
           | OPEN ->
-              extend_pos lb (*__FUNCTION__*) pos1 (open_ false lb)
+              extend_pos lb (*__FUNCTION__*) pos1 (open_ require_pos false lb)
           | PRIVATE ->
               consume_token lb;
-              extend_pos lb (*__FUNCTION__*) pos1 (open_ true lb)
+              extend_pos lb (*__FUNCTION__*) pos1 (open_ require_pos true lb)
           | QID _ ->
               let ps = nelist path_tks path lb in
               begin
@@ -565,12 +577,13 @@ and command (lb:'token lexbuf) : p_command =
                     extend_pos lb (*__FUNCTION__*) pos1 (P_require_as(p,i))
                 | _ ->
                     set_expected_tokens lb [AS] ;
-                    extend_pos lb (*__FUNCTION__*) pos1 (P_require(None,ps))
+                    extend_pos lb (*__FUNCTION__*) pos1
+                      (P_require(require_pos,None,ps))
               end
           | _ -> expected lb "" [OPEN;PRIVATE;QID[]]
         end
     | OPEN ->
-        extend_pos lb (*__FUNCTION__*) pos1 (open_ false lb)
+        extend_pos lb (*__FUNCTION__*) pos1 (open_ None false lb)
     | SYMBOL ->
         extend_pos lb (*__FUNCTION__*) pos1 (symbol p_sym_mod lb)
     | L_PAREN
