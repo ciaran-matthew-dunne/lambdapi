@@ -35,8 +35,8 @@ class TestInitialize(LSPTestCase):
         self.assertTrue(caps.get("definitionProvider"))
         comp = caps.get("completionProvider") or {}
         self.assertTrue(comp.get("resolveProvider"))
-        self.assertNotIn("triggerCharacters", comp,
-            "no trigger characters until completion is prefix-aware")
+        self.assertEqual(comp.get("triggerCharacters"), ["."],
+            '"." triggers module-path and qualified-name completion')
 
     def test_initialize_with_root_uri(self):
         result = self.server.initialize(

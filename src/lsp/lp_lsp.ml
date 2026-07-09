@@ -132,11 +132,12 @@ let do_initialize ofmt ~id params =
         ; "documentSymbolProvider", `Bool true
         ; "hoverProvider", `Bool true
         ; "definitionProvider", `Bool true
-        (* No [triggerCharacters]: "." would be the module-path
-           separator, but completion is not prefix-aware yet, so a
-           dot-triggered popup would not be filtered to the module.
-           Clients still trigger on identifier characters themselves. *)
-        ; "completionProvider", `Assoc ["resolveProvider", `Bool true]
+        (* "." separates module-path and qualified-name segments; the
+           completion handler resolves both contexts (and stays quiet
+           on a dot-trigger anywhere else). *)
+        ; "completionProvider",
+          `Assoc [ "resolveProvider", `Bool true
+                 ; "triggerCharacters", `List [`String "."] ]
         ; "codeActionProvider", `Bool false
         ]]) in
   LIO.send_json ofmt msg
@@ -409,19 +410,37 @@ let in_proof_at (doc : Lp_doc.t) line character : bool =
    in the rest of the server. Being text-based, it also works in
    regions the checker never reached (mid-edit text, code past a
    parse error). *)
+(* Byte offset of each code point of [str], with the total length as
+   a final sentinel. *)
+let codepoint_offsets (str : string) : int array =
+  let offs = ref [] and i = ref 0 in
+  let n = String.length str in
+  while !i < n do
+    offs := !i :: !offs;
+    i := !i + Uchar.utf_decode_length (String.get_utf_8_uchar str !i)
+  done;
+  Array.of_list (List.rev (n :: !offs))
+
+(* Number of code points of [s]. *)
+let cp_len (s : string) : int = Array.length (codepoint_offsets s) - 1
+
+(** [line_prefix doc line col] is the text of the (0-based) [line] of
+    [doc] before the cursor column [col] (counted in code points,
+    like every position in the server). *)
+let line_prefix (doc : Lp_doc.t) line col : string option =
+  match List.nth_opt (String.split_on_char '\n' doc.Lp_doc.text) line with
+  | None -> None
+  | Some str ->
+    let offs = codepoint_offsets str in
+    let ncp = Array.length offs - 1 in
+    let col = if col < 0 then 0 else if col > ncp then ncp else col in
+    Some (String.sub str 0 offs.(col))
+
 let token_at_pos (doc : Lp_doc.t) line col : string option =
   match List.nth_opt (String.split_on_char '\n' doc.Lp_doc.text) line with
   | None -> None
   | Some str ->
-    (* Byte offset of each code point, with the total length as a
-       final sentinel. *)
-    let offs = ref [] and i = ref 0 in
-    let n = String.length str in
-    while !i < n do
-      offs := !i :: !offs;
-      i := !i + Uchar.utf_decode_length (String.get_utf_8_uchar str !i)
-    done;
-    let offs = Array.of_list (List.rev (n :: !offs)) in
+    let offs = codepoint_offsets str in
     let ncp = Array.length offs - 1 in
     (* Delimiters are ASCII; a multi-byte code point (first byte
        [>= '\x80']) always belongs to a token. *)
@@ -438,6 +457,97 @@ let token_at_pos (doc : Lp_doc.t) line col : string option =
       while !e + 1 < ncp && not (is_delim (!e + 1)) do incr e done;
       Some (String.sub str offs.(!s) (offs.(!e + 1) - offs.(!s)))
 
+(* --- Completion context ------------------------------------------- *)
+
+(* Complete whitespace-separated words of [s], and the token still
+   being typed (empty when [s] ends in whitespace). *)
+let words_and_partial (s : string) : string list * string =
+  let s = String.map (fun c -> if c = '\t' then ' ' else c) s in
+  match List.rev (String.split_on_char ' ' s) with
+  | [] -> [], ""
+  | partial :: rest ->
+    List.rev (List.filter (fun w -> w <> "") rest), partial
+
+(** Cursor context for completion, determined lexically from the
+    line before the cursor — the text being typed rarely parses, so
+    the AST cannot tell. *)
+type completion_context =
+  | Ctx_require of string * int
+    (** Module path of a [require]/[open]: the typed partial path
+        and its start column. *)
+  | Ctx_default
+
+let completion_context (doc : Lp_doc.t) line col : completion_context =
+  match line_prefix doc line col with
+  | None -> Ctx_default
+  | Some prefix ->
+    let words, partial = words_and_partial prefix in
+    let words = match words with "private" :: ws -> ws | ws -> ws in
+    (* [require] accepts several paths; [as] switches to an alias
+       name and [;] ends the command. *)
+    let path_words ws =
+      List.for_all
+        (fun w -> w = "open"
+                  || (w <> "as" && not (String.contains w ';')))
+        ws
+    in
+    match words with
+    | ("require" | "open") :: rest when path_words rest ->
+      Ctx_require (partial, col - cp_len partial)
+    | _ -> Ctx_default
+
+(* Module paths under the current library mappings (the workspace
+   package and every map-dir), found by scanning the mapped
+   directories for source files. *)
+let module_path_candidates () : string list =
+  let out = ref [] in
+  let rec scan prefix dir depth =
+    if depth > 0 then
+      match Sys.readdir dir with
+      | exception Sys_error _ -> ()
+      | entries ->
+        Array.iter (fun e ->
+          if e <> "" && e.[0] <> '.' then
+            let p = Filename.concat dir e in
+            if (try Sys.is_directory p with Sys_error _ -> false) then
+              scan (prefix @ [e]) p (depth - 1)
+            else
+              List.iter (fun ext ->
+                match Filename.chop_suffix_opt ~suffix:ext e with
+                | Some base ->
+                  out := String.concat "." (prefix @ [base]) :: !out
+                | None -> ())
+                [".lp"; ".dk"; ".lpo"])
+          entries
+  in
+  Library.iter (fun mp dir -> scan mp dir 8);
+  List.sort_uniq Stdlib.compare !out
+
+(* Raw LSP range on one line (character units as sent by clients). *)
+let mk_char_range line scol ecol : J.t =
+  `Assoc [
+    "start", `Assoc ["line", `Int line; "character", `Int scol];
+    "end",   `Assoc ["line", `Int line; "character", `Int ecol];
+  ]
+
+(* Completion items replacing the typed [partial] (running from
+   [start_col] to the cursor) by a full module path. The explicit
+   [textEdit] matters: "." is not a word character in editors, so a
+   plain label would be inserted after the last dot. *)
+let mk_module_path_items ~line ~start_col ~cursor_col partial
+  : J.t list =
+  module_path_candidates ()
+  |> List.filter (String.is_prefix partial)
+  |> List.map (fun mp ->
+      `Assoc [
+        "label", `String mp;
+        "kind", `Int 9;                          (* Module *)
+        "filterText", `String mp;
+        "textEdit", `Assoc
+          [ "range", mk_char_range line start_col cursor_col
+          ; "newText", `String mp ];
+      ])
+
 (** Tactic keywords offered as completions inside a proof and
     documented on hover. Each entry is [(name, detail, doc, snippet)]:
     [detail] is a one-line summary shown next to the completion label,
@@ -452,9 +562,8 @@ let token_at_pos (doc : Lp_doc.t) line col : string option =
     [query_completions]. [P_tac_and] is deliberately absent: it has
     no concrete syntax (only built internally by [eval]). *)
 let tactic_completions : (string * string * string * string) list = [
-  "admit", "end proof as axiom",
-  "Adds new symbols (axioms) to the environment proving the focused \
-   goal.",
+  "admit", "discharge goal as axiom",
+  "Adds new symbols (axioms) to the environment proving the focused goal.",
   "admit";
 
   "all_hyps", "apply a term to every hypothesis",
@@ -1086,54 +1195,70 @@ let do_completion ofmt ~id params =
     | None -> LIO.send_json ofmt (LSP.mk_reply ~id ~result:empty)
     | Some ss ->
       Pure.restore_time ss;
-      let syms = Pure.get_symbols ss in
-      let in_proof = in_proof_at doc line character in
-      (* Symbols. No [kind]: the LSP completion kinds don't match
-         lambdapi's notions, so we don't force a classification.
-         `detail` is filled in on [completionItem/resolve]; [data]
-         carries what resolve needs to find the symbol again. *)
-      let symbol_items =
-        Extra.StrMap.fold (fun name s acc ->
-          (* Ghost symbols (internal, e.g. for unification rules) are
-             not part of the user-facing scope. Inside a proof, tactic
-             keywords shadow symbols of the same name in the completion
-             list: the user almost certainly means the tactic. *)
-          if s.Term.sym_path = Sign.Ghost.path
-          || (in_proof && is_tactic_name name) then acc
+      let reply items =
+        LIO.send_json ofmt (LSP.mk_reply ~id ~result:(`Assoc [
+          "isIncomplete", `Bool false; "items", `List items])) in
+      (* A "."-triggered popup only makes sense in the contexts that
+         understand dots; stay quiet in the others. *)
+      let dot_triggered =
+        match json_path (`Assoc params) ["context"; "triggerKind"] with
+        | Some (`Int 2) -> true
+        | _ -> false
+      in
+      match completion_context doc line character with
+      | Ctx_require (partial, start_col) ->
+        reply (mk_module_path_items ~line ~start_col
+                 ~cursor_col:character partial)
+      | Ctx_default when dot_triggered -> reply []
+      | Ctx_default ->
+        let syms = Pure.get_symbols ss in
+        let in_proof = in_proof_at doc line character in
+        (* Symbols. No [kind]: the LSP completion kinds don't match
+           lambdapi's notions, so we don't force a classification.
+           `detail` is filled in on [completionItem/resolve]; [data]
+           carries what resolve needs to find the symbol again. *)
+        let symbol_items =
+          Extra.StrMap.fold (fun name s acc ->
+            (* Ghost symbols (internal, e.g. for unification rules) are
+               not part of the user-facing scope. Inside a proof, tactic
+               keywords shadow symbols of the same name in the completion
+               list: the user almost certainly means the tactic. *)
+            if s.Term.sym_path = Sign.Ghost.path
+            || (in_proof && is_tactic_name name) then acc
+            else
+              `Assoc [
+                "label", `String name;
+                "data",  `Assoc [ "kind", `String "symbol"
+                                ; "uri",  `String uri ];
+              ] :: acc
+          ) syms [] in
+        (* Tactic keywords and proof enders inside proofs; command
+           keywords and modifiers outside. Queries are valid in both
+           contexts. *)
+        let keyword_items =
+          if in_proof then
+            mk_keyword_items "0" tactic_completions
+            @ mk_keyword_items "2" (query_completions
+                                    @ proof_end_completions)
           else
-            `Assoc [
-              "label", `String name;
-              "data",  `Assoc [ "kind", `String "symbol"
-                              ; "uri",  `String uri ];
-            ] :: acc
-        ) syms [] in
-      (* Tactic keywords and proof enders inside proofs; command
-         keywords and modifiers outside. Queries are valid in both
-         contexts. *)
-      let keyword_items =
-        if in_proof then
-          mk_keyword_items "0" tactic_completions
-          @ mk_keyword_items "2" (query_completions
-                                  @ proof_end_completions)
-        else
-          mk_keyword_items "0" keyword_completions
-          @ mk_keyword_items "2" query_completions in
-      (* Hypotheses of the focused goal. *)
-      let hyp_items =
-        if not in_proof then [] else
-          List.map (fun (hname, htype) ->
-            `Assoc [
-              "label", `String hname;
-              "kind",  `Int 6;                  (* Variable *)
-              "detail", `String htype;
-              "sortText", `String ("1" ^ hname);
-            ]
-          ) (hyps_at_cursor doc line character) in
-      let result = `Assoc [
-        "isIncomplete", `Bool false;
-        "items", `List (symbol_items @ keyword_items @ hyp_items);
-      ] in
-      LIO.send_json ofmt (LSP.mk_reply ~id ~result)
+            mk_keyword_items "0" keyword_completions
+            @ mk_keyword_items "2" query_completions in
+        (* Hypotheses of the focused goal. *)
+        let hyp_items =
+          if not in_proof then [] else
+            List.map (fun (hname, htype) ->
+              `Assoc [
+                "label", `String hname;
+                "kind",  `Int 6;                  (* Variable *)
+                "detail", `String htype;
+                "sortText", `String ("1" ^ hname);
+              ]
+            ) (hyps_at_cursor doc line character) in
+        let result = `Assoc [
+          "isIncomplete", `Bool false;
+          "items", `List (symbol_items @ keyword_items @ hyp_items);
+        ] in
+        LIO.send_json ofmt (LSP.mk_reply ~id ~result)
 
 (** Attach [detail] (and eventually other fields) to the completion
     item the client highlighted. The initial completion response is
