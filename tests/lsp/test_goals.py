@@ -3,6 +3,7 @@
 import unittest
 
 from .base import LSPTestCase, requires_stdlib
+from .client import LSPError
 
 
 @requires_stdlib
@@ -46,11 +47,12 @@ class TestGoalsUriHandling(LSPTestCase):
     """goals request should behave sensibly on unknown URIs."""
 
     def test_goals_on_unopened_doc_does_not_crash(self):
-        # This must return quickly and not hang.
+        # An error/null response is OK; a timeout (hang) is not.
         try:
             self.server.goals("file:///not-opened.lp", line=0, character=0)
-        except Exception:
-            pass  # An error response is OK; a hang is not.
+        except LSPError as e:
+            self.assertNotIn("timeout", str(e).lower(),
+                "server must reply to goals on an unknown URI, not hang")
         # Server should still handle subsequent requests.
         uri, _, _, diags = self.open_fixture("simple.lp")
         self.assertNoErrors(diags)

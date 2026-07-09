@@ -270,8 +270,14 @@ let document_symbols_of_nodes (nodes : Lp_doc.doc_node list) : J.t list =
       match Pure.Command.get_elt cmd with
       | P_symbol s ->
         let sel = range_or_fallback s.p_sym_nam.pos cmd_range in
+        (* Mirror the flat mode's Constant/Function distinction as far
+           as the AST can see it: a symbol without [≔] (no definition,
+           no proof) declares an axiom/constructor. Rules added by
+           later commands are not accounted for. *)
+        let kind = if s.p_sym_def then 12 (* Function *)
+                   else 14 (* Constant *) in
         [ mk_document_symbol
-            ~name:s.p_sym_nam.elt ~kind:12   (* Function *)
+            ~name:s.p_sym_nam.elt ~kind
             ~range:cmd_range ~selection_range:sel () ]
       | P_inductive (_, _, _, inds) ->
         List.map (fun (ind : p_inductive) ->
@@ -435,7 +441,7 @@ let token_at_pos (doc : Lp_doc.t) line col : string option =
     let is_delim k =
       match str.[offs.(k)] with
       | ' ' | '\t' | '\r' | '(' | ')' | '[' | ']' | '{' | '}'
-      | ';' | ',' | '"' | '.' -> true
+      | ';' | ',' | '"' | '.' | ':' | '@' -> true
       | _ -> false
     in
     if col < 0 || col >= ncp || is_delim col then None
@@ -897,7 +903,11 @@ let hover_symInfo ofmt ~id params =
       | None ->
         raise (Error.fatal_no_pos "Final state is missing: the document \
                                    was never successfully loaded") in
-    Pure.restore_time ss;
+    (* Not just [restore_time]: hover prints types, and the printer's
+       signature state ([Print.sig_state]) is a plain ref that time
+       restoration does not cover — without this, types would render
+       with whichever document's notations were installed last. *)
+    Pure.set_print_state ss;
 
     let send_type_hover ?range sym =
       let sym_type = Format.asprintf "%a" Core.Print.sym_type sym in

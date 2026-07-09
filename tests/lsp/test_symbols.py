@@ -86,6 +86,20 @@ class TestHierarchicalDocumentSymbol(LSPTestCase):
         self.assertIsNotNone(bool_sym)
         self.assertEqual(bool_sym.get("children", []), [])
 
+    def test_symbol_kinds_distinguish_declarations(self):
+        """AST-based kinds: a symbol without `≔` (declaration) is
+        Constant (14), a defined symbol is Function (12), inductive
+        types are Enum (10)."""
+        uri, _, _, _ = self.open_fixture("inductive.lp")
+        syms = self.server.document_symbol(uri)
+        kinds = {s["name"]: s["kind"] for s in syms}
+        self.assertEqual(kinds.get("Bool"), 14,
+            f"declaration should be Constant (14); got {kinds}")
+        self.assertEqual(kinds.get("height"), 14)
+        self.assertEqual(kinds.get("mirror"), 12,
+            f"defined symbol should be Function (12); got {kinds}")
+        self.assertEqual(kinds.get("Tree"), 10)
+
 
 if __name__ == "__main__":
     unittest.main()

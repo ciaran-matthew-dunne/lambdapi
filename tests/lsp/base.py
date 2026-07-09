@@ -160,9 +160,3 @@ class LSPTestCase(unittest.TestCase):
                 f"{msg}: {len(errs)} error(s), first: {errs[0].get('message')}"
                 if msg else
                 f"{len(errs)} error(s), first: {errs[0].get('message')}")
-
-    def assert_server_alive(self):
-        """Prove the server can still handle a request (via a real open doc)."""
-        uri, _, _, _ = self.open_fixture("simple.lp")
-        syms = self.server.document_symbol(uri)
-        self.assertIsNotNone(syms)

@@ -5,3 +5,4 @@ inductive Tree : TYPE ≔
 | node : Tree → Tree → Tree;
 
 symbol height : Tree → Bool;
+symbol mirror : Tree → Tree ≔ λ t, t;
