@@ -66,6 +66,30 @@ class TestRequirePathCompletion(LSPTestCase):
         self.assertIn("Stdlib.Nat",
                       _labels(_complete(self.server, uri, 0, 15)))
 
+    def test_indented_require_offers_paths(self):
+        uri, _src, _ = self.open_text("req6.lp", "  require test.\n")
+        self.assertIn("test.simple",
+                      _labels(_complete(self.server, uri, 0, 15)))
+
+    def test_second_path_on_the_same_require(self):
+        uri, _src, _ = self.open_text("req7.lp",
+            "require test.simple test.\n")
+        self.assertIn("test.inductive",
+                      _labels(_complete(self.server, uri, 0, 25)))
+
+    def test_no_paths_after_as(self):
+        """`require M as <cursor>` expects a fresh alias name, not a
+        module path."""
+        uri, _src, _ = self.open_text("req8.lp",
+            "require test.simple as \n")
+        self.assertNotIn("test.simple",
+                         _labels(_complete(self.server, uri, 0, 23)))
+
+    def test_private_require_offers_paths(self):
+        uri, _src, _ = self.open_text("req9.lp", "private open test.\n")
+        self.assertIn("test.simple",
+                      _labels(_complete(self.server, uri, 0, 18)))
+
 
 class TestQualifiedCompletion(LSPTestCase):
     """After `M.` in term position, complete the non-private symbols
@@ -108,6 +132,17 @@ class TestQualifiedCompletion(LSPTestCase):
         self.assertIn("inj", labels)
         self.assertNotIn("priv", labels,
             "private symbols must not be offered outside their module")
+
+    def test_qualified_in_tactic_argument(self):
+        uri, _src, _ = self.open_text("qual6.lp",
+            "require test.simple;\n"
+            "symbol z : test.simple.Nat ≔\n"
+            "begin\n"
+            "  apply test.simple.\n"
+            "end;\n")
+        labels = _labels(_complete(self.server, uri, 3, 20))
+        self.assertIn("zero", labels,
+            "qualified completion should work in tactic arguments")
 
     def test_intermediate_segment_offered(self):
         """`test.` in term position: `test` is not itself a module,
@@ -215,6 +250,89 @@ class TestArgumentContexts(LSPTestCase):
         self.assertIn("n", labels)
         self.assertIn("triv", labels,
             "in-scope symbols are valid tactic arguments")
+
+
+class TestProofRegion(LSPTestCase):
+    """Being inside the command of a theorem is not being inside its
+    proof: tactics belong strictly between `begin` and `end`."""
+
+    THM = (
+        "constant symbol Nat : TYPE;\n"
+        "constant symbol zero : Nat;\n"
+        "symbol triv : Nat → Nat ≔\n"
+        "begin\n"
+        "  assume n;\n"
+        "  refine n;\n"
+        "end;\n"
+    )
+
+    def test_no_tactics_on_the_statement_line(self):
+        uri, _src, _ = self.open_text("region1.lp", self.THM)
+        # Line 2 is the statement (`symbol triv : Nat → Nat ≔`).
+        labels = _labels(_complete(self.server, uri, 2, 24))
+        self.assertNotIn("refine", labels,
+            "the statement is not a proof position")
+        self.assertIn("zero", labels)
+
+    def test_tactics_inside_the_script(self):
+        uri, _src, _ = self.open_text("region2.lp", self.THM)
+        labels = _labels(_complete(self.server, uri, 5, 2))
+        self.assertIn("refine", labels)
+
+    def test_new_line_above_a_proof_gets_keywords(self):
+        """Typing a new declaration above an existing proof: the doc
+        no longer parses and the stale node's span covers the cursor
+        line, but that line is before `begin` — command keywords, not
+        tactics."""
+        uri, _src, _ = self.open_text("region3.lp", self.THM)
+        broken = self.THM.replace("symbol triv", "co\nsymbol triv", 1)
+        self.server.did_change(uri, broken, 2)
+        self.server.drain_notifications(timeout=5.0)
+        # Line 2 is the fresh "co" line.
+        labels = _labels(_complete(self.server, uri, 2, 2))
+        self.assertIn("constant", labels,
+            "command keywords should be offered above the proof")
+        self.assertNotIn("refine", labels,
+            "tactics must not leak out of the proof script")
+
+
+class TestModifierContext(LSPTestCase):
+    """After modifiers, only further modifiers and the declarations
+    they qualify are valid."""
+
+    def test_symbol_offered_after_modifier(self):
+        uri, _src, _ = self.open_text("mod1.lp",
+            "constant symbol Nat : TYPE;\nconstant \n")
+        r = _complete(self.server, uri, 1, 9)
+        by_label = {i["label"]: i for i in r.get("items", [])}
+        self.assertIn("symbol", by_label,
+            f"symbol should follow a modifier; got "
+            f"{sorted(by_label)[:10]}")
+        self.assertTrue(
+            by_label["symbol"]["sortText"].startswith("0"),
+            "symbol should rank first after a modifier")
+        self.assertIn("injective", by_label)
+        self.assertNotIn("constant", by_label,
+            "already-typed modifiers are not repeated")
+        self.assertNotIn("rule", by_label,
+            "rule cannot follow a modifier")
+        self.assertNotIn("Nat", by_label,
+            "a modifier position does not take terms")
+
+    def test_private_offers_require_open(self):
+        uri, _src, _ = self.open_text("mod2.lp", "private \n")
+        labels = _labels(_complete(self.server, uri, 0, 8))
+        for kw in ("symbol", "require", "open", "protected"):
+            self.assertIn(kw, labels,
+                f"{kw!r} can follow `private`")
+
+    def test_associative_offers_sides_and_symbol(self):
+        uri, _src, _ = self.open_text("mod3.lp",
+            "commutative associative \n")
+        labels = _labels(_complete(self.server, uri, 0, 24))
+        for kw in ("left", "right", "symbol"):
+            self.assertIn(kw, labels,
+                f"{kw!r} can follow `associative`")
 
 
 if __name__ == "__main__":

@@ -392,18 +392,6 @@ let get_context_node doc line pos =
   | Some n -> Some n
   | None -> find_node_at_pos doc.Lp_doc.good_nodes line pos
 
-(* True iff the command at the cursor carries a proof script. Every
-   [P_symbol] node has a goals snapshot (symbol elaboration goes
-   through the proof machinery), so a non-empty [goals] field would
-   not discriminate. *)
-let in_proof_at (doc : Lp_doc.t) line character : bool =
-  match get_context_node doc line character with
-  | Some n ->
-    (match Pure.Command.get_elt n.Lp_doc.cmd with
-     | Parsing.Syntax.P_symbol {p_sym_prf = Some _; _} -> true
-     | _ -> false)
-  | None -> false
-
 (* Identifier-ish token at the (0-based) [line]/[col] of [doc]'s text:
    the maximal run of non-delimiter code points around the cursor.
    Columns are counted in code points, matching the position handling
@@ -457,6 +445,67 @@ let token_at_pos (doc : Lp_doc.t) line col : string option =
       while !e + 1 < ncp && not (is_delim (!e + 1)) do incr e done;
       Some (String.sub str offs.(!s) (offs.(!e + 1) - offs.(!s)))
 
+(* [begin_pos_of doc n] is the position (1-based line, code point
+   column) of the [begin] keyword of [n]'s command in [doc]'s current
+   text, if any. [begin] is a reserved word, so the first
+   word-delimited occurrence within the command's span opens the
+   proof script. *)
+let begin_pos_of (doc : Lp_doc.t) (n : Lp_doc.doc_node)
+  : (int * int) option =
+  match Pure.Command.get_pos n.Lp_doc.cmd with
+  | None -> None
+  | Some Pos.{start_line; end_line; _} ->
+    let lines = String.split_on_char '\n' doc.Lp_doc.text in
+    let delim c =
+      match c with
+      | ' ' | '\t' | '\r' | '(' | ')' | '[' | ']' | '{' | '}'
+      | ';' | ',' | '"' | '.' | ':' | '@' -> true
+      | _ -> false
+    in
+    let find_in_line l =
+      match List.nth_opt lines (l - 1) with
+      | None -> None
+      | Some str ->
+        let len = String.length str in
+        let rec search i =
+          if i + 5 > len then None
+          else if String.sub str i 5 = "begin"
+               && (i = 0 || delim str.[i - 1])
+               && (i + 5 = len || delim str.[i + 5])
+          then
+            (* Byte index to code point column ("b" is ASCII, so it
+               sits on a code point boundary). *)
+            let offs = codepoint_offsets str in
+            let rec cp j = if offs.(j) = i then j else cp (j + 1) in
+            Some (l, cp 0)
+          else search (i + 1)
+        in
+        search 0
+    in
+    let rec scan l =
+      if l > end_line then None
+      else match find_in_line l with
+        | Some p -> Some p
+        | None -> scan (l + 1)
+    in
+    scan start_line
+
+(* True iff the cursor is inside the proof script of the command at
+   the cursor. Carrying a proof ([p_sym_prf]) is not enough: the
+   command's span also covers the statement (name, type), which is
+   not a proof position — require the cursor to be at or after the
+   [begin] keyword. *)
+let in_proof_at (doc : Lp_doc.t) line character : bool =
+  match get_context_node doc line character with
+  | Some n ->
+    (match Pure.Command.get_elt n.Lp_doc.cmd with
+     | Parsing.Syntax.P_symbol {p_sym_prf = Some _; _} ->
+       (match begin_pos_of doc n with
+        | Some bpos -> compare bpos (line + 1, character) <= 0
+        | None -> false)
+     | _ -> false)
+  | None -> false
+
 (* --- Completion context ------------------------------------------- *)
 
 (* Complete whitespace-separated words of [s], and the token still
@@ -482,12 +531,19 @@ type completion_context =
   | Ctx_assoc_side      (** After [associative] or [infix]. *)
   | Ctx_flag_name       (** Inside the string argument of [flag]. *)
   | Ctx_switch          (** After the string argument of [flag]. *)
+  | Ctx_modifier of string list
+    (** After one or more symbol modifiers (the words so far). *)
   | Ctx_tactic_arg
     (** Argument of a tactic that names existing hypotheses. *)
   | Ctx_default
 
 (* Tactics whose argument commonly mentions hypotheses. *)
 let arg_tactics = ["apply"; "refine"; "rewrite"; "remove"; "generalize"]
+
+(* Symbol property/exposition modifiers, preceding symbol/inductive. *)
+let modifier_words =
+  ["constant"; "injective"; "commutative"; "associative"; "opaque";
+   "private"; "protected"; "sequential"]
 
 (* [qualified_of partial] splits the dotted token ending [partial] at
    its last dot: [Some ("Stdlib.Nat", "ze")] for ["(Stdlib.Nat.ze"].
@@ -509,7 +565,6 @@ let completion_context (doc : Lp_doc.t) line col : completion_context =
   | None -> Ctx_default
   | Some prefix ->
     let words, partial = words_and_partial prefix in
-    let words = match words with "private" :: ws -> ws | ws -> ws in
     (* [require] accepts several paths; [as] switches to an alias
        name and [;] ends the command. *)
     let path_words ws =
@@ -523,7 +578,9 @@ let completion_context (doc : Lp_doc.t) line col : completion_context =
         (fun n c -> if c = '"' then n + 1 else n) 0 prefix
     in
     match words with
-    | ("require" | "open") :: rest when path_words rest ->
+    | ("require" | "open") :: rest
+    | "private" :: ("require" | "open") :: rest
+      when path_words rest ->
       Ctx_require (partial, col - cp_len partial)
     | ["notation"; _] when quotes = 0 -> Ctx_notation_arg
     | "flag" :: _ when quotes = 1 -> Ctx_flag_name
@@ -533,11 +590,18 @@ let completion_context (doc : Lp_doc.t) line col : completion_context =
       | Some (mpath, name) -> Ctx_qualified (mpath, name)
       | None ->
         match List.rev words with
-        | ("associative" | "infix") :: _ -> Ctx_assoc_side
+        (* [associative] is a modifier, handled below (its sides are
+           added there); a trailing [infix] belongs to [notation]. *)
+        | "infix" :: _ -> Ctx_assoc_side
         | _ ->
-          match words with
-          | t :: _ when List.mem t arg_tactics -> Ctx_tactic_arg
-          | _ -> Ctx_default
+          if words <> []
+          && List.for_all
+               (fun w -> List.mem w modifier_words) words
+          then Ctx_modifier words
+          else
+            match words with
+            | t :: _ when List.mem t arg_tactics -> Ctx_tactic_arg
+            | _ -> Ctx_default
 
 (* Module paths under the current library mappings (the workspace
    package and every map-dir), found by scanning the mapped
@@ -1327,6 +1391,26 @@ let flag_name_items () : J.t list =
     (fun name _ acc -> `Assoc ["label", `String name] :: acc)
     Stdlib.(!Console.boolean_flags) []
 
+(* After one or more modifiers, only further modifiers and the
+   declaration keywords they qualify are valid. The declarations
+   rank first; a trailing [associative] also offers its sides. *)
+let mk_modifier_items (words : string list) : J.t list =
+  let pick names =
+    List.filter (fun (n, _, _, _) -> List.mem n names)
+      keyword_completions in
+  let heads =
+    "symbol" :: "inductive"
+    :: (if words = ["private"] then ["require"; "open"] else []) in
+  let mods =
+    List.filter (fun m -> not (List.mem m words)) modifier_words in
+  let sides =
+    match List.rev words with
+    | "associative" :: _ -> mk_keyword_items "0" assoc_side_completions
+    | _ -> []
+  in
+  sides @ mk_keyword_items "0" (pick heads)
+  @ mk_keyword_items "1" (pick mods)
+
 let do_completion ofmt ~id params =
   let uri, line, character = get_docTextPosition params in
   let empty = `Assoc ["isIncomplete", `Bool false; "items", `List []] in
@@ -1360,6 +1444,7 @@ let do_completion ofmt ~id params =
         reply (mk_keyword_items "0" assoc_side_completions)
       | Ctx_switch -> reply (mk_keyword_items "0" switch_completions)
       | Ctx_flag_name -> reply (flag_name_items ())
+      | Ctx_modifier words -> reply (mk_modifier_items words)
       | (Ctx_default | Ctx_tactic_arg) when dot_triggered -> reply []
       | Ctx_default | Ctx_tactic_arg ->
         let syms = Pure.get_symbols ss in
