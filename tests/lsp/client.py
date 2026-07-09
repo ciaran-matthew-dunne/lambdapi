@@ -187,6 +187,23 @@ class LSPServer:
             raise LSPError(f"{method}: {msg['error']}")
         return msg.get("result")
 
+    def request_with_id(self, rid, method, params=None):
+        """Send a request with an explicit id (JSON-RPC also allows
+        string ids) and return the raw response message."""
+        reply = queue.Queue(maxsize=1)
+        with self._lock:
+            self._pending[rid] = reply
+        self._write({"jsonrpc": "2.0", "id": rid,
+                     "method": method, "params": params or {}})
+        try:
+            return reply.get(timeout=self.timeout)
+        except queue.Empty:
+            with self._lock:
+                self._pending.pop(rid, None)
+            raise LSPError(
+                f"timeout waiting for {method} (id={rid!r}); "
+                f"stderr={self._stderr[-5:]}")
+
     def notify(self, method, params=None):
         self._write({"jsonrpc": "2.0",
                      "method": method, "params": params or {}})

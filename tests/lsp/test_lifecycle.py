@@ -120,6 +120,29 @@ class TestUnknownMethod(LSPTestCase):
         self.assertNoErrors(diags)
 
 
+class TestStringRequestIds(LSPTestCase):
+    """JSON-RPC request ids may be strings, not just integers; the
+    server must echo them back verbatim instead of failing silently."""
+
+    def test_hover_with_string_id_is_answered(self):
+        uri, _text, src, _ = self.open_fixture("simple.lp")
+        line, col = src.find(r"rule double zero", "zero")
+        msg = self.server.request_with_id(
+            "hover-1", "textDocument/hover", {
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": col}})
+        self.assertEqual(msg.get("id"), "hover-1",
+            f"reply must echo the string id verbatim; got {msg!r}")
+        self.assertIn("result", msg)
+
+    def test_unknown_method_with_string_id_gets_error_reply(self):
+        msg = self.server.request_with_id(
+            "nope-1", "workspace/doesNotExist", {})
+        self.assertEqual(msg.get("id"), "nope-1")
+        self.assertEqual(msg.get("error", {}).get("code"), -32601,
+            f"expected MethodNotFound; got {msg!r}")
+
+
 class TestShutdownExit(LSPTestCase):
     """shutdown replies null; exit terminates the process."""
 

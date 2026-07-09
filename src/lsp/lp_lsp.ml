@@ -24,8 +24,6 @@ let   list_field name dict = U.to_list   List.(assoc name dict)
 let string_field name dict = U.to_string List.(assoc name dict)
 
 (* Conditionals *)
-let oint_field  name dict =
-  Option.map_default U.to_int 0 List.(assoc_opt name dict)
 let odict_field name dict =
   Option.get [] U.(to_option to_assoc
                       (Option.get `Null List.(assoc_opt name dict)))
@@ -1053,7 +1051,9 @@ let protect_dispatch p f x =
    theading model there is not a lot of difference yet; something to
    think for the future. *)
 let dispatch_message ofmt dict =
-  let id     = oint_field "id" dict in
+  (* The "id" member is kept verbatim (JSON-RPC ids may be numbers or
+     strings) and echoed back as-is in replies. *)
+  let id     = Option.get `Null (List.assoc_opt "id" dict) in
   let params = odict_field "params" dict in
   match string_field "method" dict with
   (* Requests *)
@@ -1134,9 +1134,9 @@ let process_input ofmt (com : J.t) =
        "id" field; note that id 0 is a valid request id (Zed numbers
        its first request 0), so key on the field's presence. *)
     let dict = U.to_assoc com in
-    if List.mem_assoc "id" dict then
-      let id = oint_field "id" dict in
-      LIO.send_json ofmt (LSP.mk_reply ~id ~result:`Null)
+    match List.assoc_opt "id" dict with
+    | Some id -> LIO.send_json ofmt (LSP.mk_reply ~id ~result:`Null)
+    | None -> ()
 
 let main std log_file =
 
