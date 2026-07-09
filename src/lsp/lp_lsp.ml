@@ -808,20 +808,34 @@ let hyps_at_cursor (doc : Lp_doc.t) line character : (string * string) list =
         String.trim (String.sub t 1 (String.length t - 1))
       else t
     in
-    let hyps_at p =
-      match closest_before p n.Lp_doc.goals with
-      | Some ((hyps, _) :: _, _) ->
+    let hyps_of goals =
+      match goals with
+      | (hyps, _) :: _ ->
         Some (List.map (fun (hn, ht) -> (hn, strip_type ht)) hyps)
-      | _ -> None
+      | [] -> None
     in
-    (* Goal snapshots are recorded after each tactic, so the snapshot
-       at the exact cursor may be past the tactic that finished the
-       proof (no goals, hence no hypotheses). The state at the start
-       of the line — before the current tactic ran — is the useful
-       context then. *)
-    match hyps_at (line + 1, character) with
-    | Some hyps -> hyps
-    | None -> Option.get [] (hyps_at (line + 1, 0))
+    (* Goal snapshots record the state after each tactic, anchored at
+       the tactic's keyword, so the snapshot at the cursor may be past
+       the tactic that finished the proof (no goals, hence no
+       hypotheses). The state before that tactic — the snapshot
+       preceding its anchor, not merely the start of the line, which
+       skips too far back when several tactics share a line — is the
+       useful context then. *)
+    (match closest_before (line + 1, character) n.Lp_doc.goals with
+     | None -> []
+     | Some (goals, gpos) ->
+       match hyps_of goals with
+       | Some hyps -> hyps
+       | None ->
+         let before =
+           match gpos with
+           | Some Pos.{start_line; start_col; _} ->
+             closest_before (start_line, start_col - 1) n.Lp_doc.goals
+           | None -> None
+         in
+         match before with
+         | Some (goals, _) -> Option.get [] (hyps_of goals)
+         | None -> [])
 
 (** [get_first_error doc] returns the first error inferred from doc.logs *)
 let get_first_error doc =

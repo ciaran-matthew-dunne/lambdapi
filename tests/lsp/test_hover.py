@@ -95,6 +95,48 @@ class TestHoverTacticKeyword(LSPTestCase):
             f"hypothesis `n` has type Nat; got {text!r}")
 
 
+class TestHoverSameLineTactics(LSPTestCase):
+    """Hypothesis hovers work in every tactic of a line, not just the
+    first. Goal snapshots are anchored at each tactic's keyword and
+    record the state after it; when the tactic under the cursor closes
+    the proof, the fallback must step back to the snapshot before that
+    tactic — not to the start of the line, which with several tactics
+    on one line lands before the hypothesis was introduced."""
+
+    PROOF = (
+        "constant symbol Nat : TYPE;\n"
+        "constant symbol zero : Nat;\n"
+        "symbol triv : Nat → Nat ≔\n"
+        "begin\n"
+        "  assume n; refine n;\n"
+        "end;\n"
+    )
+
+    def test_hover_on_hypothesis_in_second_tactic(self):
+        uri, src, _ = self.open_text("sameline.lp", self.PROOF)
+        # `n` in `refine n;` — the second tactic on the line, and the
+        # one that finishes the proof. (`refine` itself contains an
+        # `n`; the hypothesis use is the one followed by `;`.)
+        line, col = src.find(r"refine n", "n;")
+        text = _hover_text(self.server.hover(uri, line, col))
+        self.assertIsNotNone(text,
+            "hover on a hypothesis used in the second tactic of a line "
+            "should show its type")
+        self.assertIn("Nat", text,
+            f"hypothesis `n` has type Nat; got {text!r}")
+
+    def test_hover_on_hypothesis_in_first_tactic(self):
+        uri, src, _ = self.open_text("sameline2.lp", self.PROOF)
+        # `n` in `assume n;` — introduced by the tactic under the
+        # cursor (`assume` contains no `n`, so plain `n` finds it).
+        line, col = src.find(r"assume n", "n")
+        text = _hover_text(self.server.hover(uri, line, col))
+        self.assertIsNotNone(text,
+            "hover on a hypothesis named in `assume` should show its type")
+        self.assertIn("Nat", text,
+            f"hypothesis `n` has type Nat; got {text!r}")
+
+
 class TestHoverMidEdit(LSPTestCase):
     """Tactic docs and hypothesis hovers survive a mid-word edit that
     breaks the parse (served from the last successfully parsed nodes)."""
