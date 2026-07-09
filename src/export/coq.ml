@@ -118,18 +118,18 @@ let command oc {elt; pos} =
       string oc "Import "; list path " " oc ps; string oc ".\n"
   | P_open(false,ps) ->
       string oc "Export "; list path " " oc ps; string oc ".\n"
-  | P_require (None, ps) ->
+  | P_require (_, None, ps) ->
       string oc "Require "; list path " " oc ps; string oc ".\n"
-  | P_require (Some true, ps) ->
+  | P_require (_, Some true, ps) ->
       string oc "Require Import "; list path " " oc ps; string oc ".\n"
-  | P_require (Some false, ps) ->
+  | P_require (_, Some false, ps) ->
       string oc "Require Export "; list path " " oc ps; string oc ".\n"
   | P_require_as (p,i) ->
     Stt.alias := StrMap.add i.elt p.elt !Stt.alias;
     string oc "Module "; ident oc i; string oc " := "; path oc p;
     string oc ".\n"
   | P_symbol
-    { p_sym_mod; p_sym_nam; p_sym_arg; p_sym_typ;
+    { p_sym_mod; p_sym_kw=_; p_sym_nam; p_sym_arg; p_sym_typ;
       p_sym_trm; p_sym_prf=_; p_sym_def } ->
       if not (is_mapped p_sym_nam.elt) then
         begin match p_sym_def, p_sym_trm, p_sym_arg, p_sym_typ with

@@ -367,8 +367,8 @@ let proof : (p_proof * p_proof_end) pp = fun ppf (p, pe) ->
 let command : p_command pp = fun ppf { elt; _ } ->
   begin match elt with
   | P_builtin (s, qid) -> out ppf "@[builtin \"%s\"@ ≔ %a@]" s qident qid
-  | P_inductive (_, _, []) -> assert false (* not possible *)
-  | P_inductive (ms, xs, i :: il) ->
+  | P_inductive (_, _, _, []) -> assert false (* not possible *)
+  | P_inductive (_, ms, xs, i :: il) ->
     let with_ind ppf i = out ppf "@,%a" (inductive "with") i in
     out ppf "@[<v>@[%a%a@]%a%a@]"
       modifiers ms (List.pp params " ") xs
@@ -378,10 +378,10 @@ let command : p_command pp = fun ppf { elt; _ } ->
   | P_open(false,ps) -> out ppf "open %a" (List.pp path " ") ps
   | P_open(true,ps) -> out ppf "private open %a" (List.pp path " ") ps
   | P_query q -> query ppf q
-  | P_require (None, ps) -> out ppf "require %a" (List.pp path " ") ps
-  | P_require (Some false, ps) ->
+  | P_require (_, None, ps) -> out ppf "require %a" (List.pp path " ") ps
+  | P_require (_, Some false, ps) ->
       out ppf "require open %a" (List.pp path " ") ps
-  | P_require (Some true, ps) ->
+  | P_require (_, Some true, ps) ->
       out ppf "require private open %a" (List.pp path " ") ps
   | P_require_as (p,i) -> out ppf "@[require %a@ as %a@]" path p ident i
   | P_rules [] -> assert false (* not possible *)
@@ -389,7 +389,7 @@ let command : p_command pp = fun ppf { elt; _ } ->
     let with_rule ppf r = out ppf "@.%a" (rule "with") r in
     rule "rule" ppf r; List.iter (with_rule ppf) rs
   | P_symbol
-    { p_sym_mod; p_sym_nam; p_sym_arg; p_sym_typ;
+    { p_sym_mod; p_sym_kw=_; p_sym_nam; p_sym_arg; p_sym_typ;
       p_sym_trm; p_sym_prf; p_sym_def } ->
     begin
       out ppf "@[<v>@[<2>%asymbol %a%a%a%a%a@]%a@]"

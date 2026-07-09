@@ -196,9 +196,9 @@ let get_ac_typ :
 let command : p_command pp = fun ppf ({elt; pos} as c) ->
   match elt with
   | P_query q -> query ppf q
-  | P_require(None,ps) ->
+  | P_require(_,None,ps) ->
       List.iter (fun {elt;_} -> out ppf "#REQUIRE %a@." Dk.mident elt) ps
-  | P_symbol{p_sym_mod; p_sym_nam=n; p_sym_arg; p_sym_typ;
+  | P_symbol{p_sym_mod; p_sym_kw=_; p_sym_nam=n; p_sym_arg; p_sym_typ;
              p_sym_trm; p_sym_prf=None; p_sym_def=_;} ->
       let ms = partition_modifiers p_sym_mod in
       begin match get_ac_typ pos ms p_sym_arg p_sym_typ with
@@ -237,7 +237,7 @@ let command : p_command pp = fun ppf ({elt; pos} as c) ->
   | P_require_as _
   | P_notation _ (* FIXME: accept quantifier notations *)
   | P_opaque _
-  | P_require(Some _,_)
+  | P_require(_,Some _,_)
   | P_symbol{p_sym_prf=Some _; _}
     -> fatal pos "Cannot be translated: %a" Pretty.command c
 
