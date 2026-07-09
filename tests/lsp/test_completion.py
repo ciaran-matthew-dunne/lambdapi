@@ -1,9 +1,10 @@
 """Completion tests: symbols, proof-context tactic keywords, hypotheses,
 and lazy detail via completionItem/resolve."""
 
+import re
 import unittest
 
-from .base import LSPTestCase
+from .base import LSPTestCase, REPO_ROOT
 
 
 def _completion_request(srv, uri, line, character):
@@ -245,6 +246,41 @@ class TestCompletionMidEdit(LSPTestCase):
         labels = {i["label"] for i in r.get("items", [])}
         self.assertNotIn("refine", labels,
             "stale proof context must clear after a clean parse")
+
+
+class TestTacticDocSync(LSPTestCase):
+    """The completion list must cover every tactic documented in the
+    manual. Extracts the ``name`` section headings from the tactic doc
+    pages and checks each is offered inside a proof — catching drift
+    when a tactic is added to the docs but not to the LSP."""
+
+    DOC_FILES = ("tactics.rst", "tacticals.rst", "equality.rst")
+
+    @classmethod
+    def documented_tactics(cls):
+        heading = re.compile(r"^``([a-z_0-9]+)(?: <[^>]+>)?``$")
+        underline = re.compile(r"^[-~^\"'=+#*]{3,}$")
+        names = set()
+        for fname in cls.DOC_FILES:
+            lines = (REPO_ROOT / "doc" / fname).read_text().splitlines()
+            for i in range(len(lines) - 1):
+                m = heading.match(lines[i].strip())
+                if m and underline.match(lines[i + 1].strip()):
+                    names.add(m.group(1))
+        return names
+
+    def test_documented_tactics_are_offered(self):
+        documented = self.documented_tactics()
+        self.assertGreaterEqual(len(documented), 20,
+            f"suspiciously few tactic headings extracted from "
+            f"{self.DOC_FILES}: {sorted(documented)}")
+        uri, _src, _ = self.open_text("sync.lp", TestCompletionInProof.PROOF)
+        r = _completion_request(self.server, uri, 5, 0)
+        labels = {i["label"] for i in r.get("items", [])}
+        missing = documented - labels
+        self.assertFalse(missing,
+            f"tactics documented in doc/*.rst but not offered as "
+            f"completions: {sorted(missing)}")
 
 
 if __name__ == "__main__":
