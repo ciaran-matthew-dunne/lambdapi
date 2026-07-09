@@ -1084,31 +1084,35 @@ let hyps_at_cursor (doc : Lp_doc.t) line character : (string * string) list =
     let hyps_of goals =
       match goals with
       | (hyps, _) :: _ ->
-        Some (List.map (fun (hn, ht) -> (hn, strip_type ht)) hyps)
-      | [] -> None
+        List.map (fun (hn, ht) -> (hn, strip_type ht)) hyps
+      | [] -> []
     in
     (* Goal snapshots record the state after each tactic, anchored at
-       the tactic's keyword, so the snapshot at the cursor may be past
-       the tactic that finished the proof (no goals, hence no
-       hypotheses). The state before that tactic — the snapshot
-       preceding its anchor, not merely the start of the line, which
-       skips too far back when several tactics share a line — is the
-       useful context then. *)
+       the tactic's keyword, so the snapshot at the cursor belongs to
+       the tactic the cursor is in. But a tactic's arguments are
+       elaborated in the state *before* it runs: the post-state may
+       focus a different goal when the tactic closes the current one
+       (dropping its local hypotheses), or no goal at all when it ends
+       the proof. So resolve names in the pre-state — the snapshot
+       preceding the anchor, not merely the start of the line, which
+       skips too far back when several tactics share a line — and keep
+       the post-state for names the tactic itself binds, e.g. the [x]
+       of [assume x]. *)
     (match closest_before (line + 1, character) n.Lp_doc.goals with
      | None -> []
-     | Some (goals, gpos) ->
-       match hyps_of goals with
-       | Some hyps -> hyps
-       | None ->
-         let before =
-           match gpos with
-           | Some Pos.{start_line; start_col; _} ->
-             closest_before (start_line, start_col - 1) n.Lp_doc.goals
-           | None -> None
-         in
-         match before with
-         | Some (goals, _) -> Option.get [] (hyps_of goals)
-         | None -> [])
+     | Some (post_goals, gpos) ->
+       let post = hyps_of post_goals in
+       let pre =
+         match gpos with
+         | Some Pos.{start_line; start_col; _} ->
+           (match
+              closest_before (start_line, start_col - 1) n.Lp_doc.goals
+            with
+            | Some (goals, _) -> hyps_of goals
+            | None -> [])
+         | None -> []
+       in
+       pre @ List.filter (fun (hn, _) -> not (List.mem_assoc hn pre)) post)
 
 (** [get_first_error doc] returns the first error inferred from doc.logs *)
 let get_first_error doc =

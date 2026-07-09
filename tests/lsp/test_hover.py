@@ -137,6 +137,63 @@ class TestHoverSameLineTactics(LSPTestCase):
             f"hypothesis `n` has type Nat; got {text!r}")
 
 
+class TestHoverSubgoalClosingTactic(LSPTestCase):
+    """Hypothesis hovers resolve in the tactic's pre-application state.
+    Goal snapshots record the state *after* each tactic, so when the
+    tactic under the cursor closes the current subgoal while a sibling
+    goal remains, the snapshot at the cursor is the *next* goal's
+    context — which lacks the subproof-local hypotheses the tactic's
+    own arguments refer to."""
+
+    PROOF = (
+        "constant symbol A : TYPE;\n"
+        "constant symbol B : TYPE;\n"
+        "constant symbol P : TYPE;\n"
+        "constant symbol mk : (A → A) → (B → B) → P;\n"
+        "symbol thm : P ≔\n"
+        "begin\n"
+        "  apply mk\n"
+        "  { assume ha; refine ha }\n"
+        "  { assume hb; refine hb };\n"
+        "end;\n"
+    )
+
+    def test_hover_on_argument_of_subgoal_closing_tactic(self):
+        """`ha` in `refine ha`: the refine closes the first subgoal and
+        the second (`B → B`) is still open, with no `ha` in context."""
+        uri, src, _ = self.open_text("subgoal.lp", self.PROOF)
+        line, col = src.find(r"refine ha", "ha")
+        text = _hover_text(self.server.hover(uri, line, col))
+        self.assertIsNotNone(text,
+            "hover on a hypothesis used by a subgoal-closing tactic "
+            "should show its type from the pre-application state")
+        self.assertIn("A", text,
+            f"hypothesis `ha` has type A; got {text!r}")
+
+    def test_hover_on_argument_of_proof_closing_tactic(self):
+        """`hb` in `refine hb`: the refine finishes the whole proof, so
+        the post-state has no goals at all."""
+        uri, src, _ = self.open_text("subgoal2.lp", self.PROOF)
+        line, col = src.find(r"refine hb", "hb")
+        text = _hover_text(self.server.hover(uri, line, col))
+        self.assertIsNotNone(text,
+            "hover on a hypothesis used by the proof-closing tactic "
+            "should show its type")
+        self.assertIn("B", text,
+            f"hypothesis `hb` has type B; got {text!r}")
+
+    def test_hover_on_binder_of_assume(self):
+        """`ha` in `assume ha`: the name only exists in the tactic's
+        post-state, which must remain a fallback."""
+        uri, src, _ = self.open_text("subgoal3.lp", self.PROOF)
+        line, col = src.find(r"assume ha", "ha")
+        text = _hover_text(self.server.hover(uri, line, col))
+        self.assertIsNotNone(text,
+            "hover on the hypothesis bound by `assume` should show its type")
+        self.assertIn("A", text,
+            f"hypothesis `ha` has type A; got {text!r}")
+
+
 class TestHoverMidEdit(LSPTestCase):
     """Tactic docs and hypothesis hovers survive a mid-word edit that
     breaks the parse (served from the last successfully parsed nodes)."""
