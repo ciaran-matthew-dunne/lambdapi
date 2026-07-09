@@ -154,6 +154,17 @@ class TestHoverCommandKeywords(LSPTestCase):
         self.assertIsNotNone(text, "hover on `rule` should document it")
         self.assertIn("rewriting", text)
 
+    def test_hover_on_settings_query(self):
+        text_lp = (
+            "constant symbol Nat : TYPE;\n"
+            "flag \"print_implicits\" on;\n"
+        )
+        uri, src, _ = self.open_text("settings.lp", text_lp)
+        line, col = src.find(r"^flag", "flag")
+        text = _hover_text(self.server.hover(uri, line, col))
+        self.assertIsNotNone(text, "hover on `flag` should document it")
+        self.assertIn("Sets a flag", text)
+
 
 class TestHoverUncheckedRegion(LSPTestCase):
     """Hover falls back to the in-scope symbol table for text the

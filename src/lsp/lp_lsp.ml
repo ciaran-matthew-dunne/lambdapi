@@ -447,11 +447,10 @@ let token_at_pos (doc : Lp_doc.t) line col : string option =
     used when the client advertises [snippetSupport] (otherwise the
     label is inserted verbatim). Covers every tactic documented in
     those files — enforced by the test suite, which extracts the
-    documented names and checks them against this list — plus the
-    proof-relevant queries ([P_tac_query], from [doc/queries.rst]).
-    Deliberately absent: the session-setting queries (debug, flag,
-    prover, prover_timeout, verbose), and [P_tac_and], which has no
-    concrete syntax (it is only built internally by [eval]). *)
+    documented names and checks them against this list. Queries,
+    which double as tactics ([P_tac_query]), live in
+    [query_completions]. [P_tac_and] is deliberately absent: it has
+    no concrete syntax (only built internally by [eval]). *)
 let tactic_completions : (string * string * string * string) list = [
   "admit", "end proof as axiom",
   "Adds new symbols (axioms) to the environment proving the focused \
@@ -469,17 +468,6 @@ let tactic_completions : (string * string * string * string) list = [
    subgoal for each argument that cannot be inferred.",
   "apply ${1:term}";
 
-  "assert", "check a typing or a conversion",
-  "`assert x₁ … xₙ ⊢ t : A;` checks that `t` has type `A`; \
-   `assert x₁ … xₙ ⊢ t ≡ u;` checks that `t` and `u` are \
-   convertible. Fails if the judgment does not hold.",
-  "assert \xe2\x8a\xa2 ${1:term} : ${2:type}";
-
-  "assertnot", "check that a typing or conversion fails",
-  "Like `assert`, but succeeds when the typing or conversion \
-   judgment does NOT hold.",
-  "assertnot \xe2\x8a\xa2 ${1:term} : ${2:type}";
-
   "assume", "introduce hypotheses",
   "If the focused goal is of the form `Π x₁ … xₙ, T`, then \
    `assume h₁ … hₙ` replaces it by `T` with each `xᵢ` replaced by \
@@ -494,10 +482,6 @@ let tactic_completions : (string * string * string * string) list = [
   "`change t` replaces the current goal `u` by `t`, provided \
    `t ≡ u`.",
   "change ${1:type}";
-
-  "compute", "normalize a term",
-  "Computes the normal form of a term.",
-  "compute ${1:term}";
 
   "eval", "interpret a term as a tactic",
   "`eval t` normalizes the term `t` and interprets the result as a \
@@ -540,16 +524,6 @@ let tactic_completions : (string * string * string * string) list = [
   "`orelse t₁ t₂` applies `t₁`; if `t₁` fails, applies `t₂`.",
   "orelse ${1:tac1} ${2:tac2}";
 
-  "print", "print a symbol or the goals",
-  "With a symbol identifier, displays information (type, notation, \
-   rules, …) about that symbol; with `unif_rule` or `coerce_rule`, \
-   the corresponding rules; without argument, the current goals.",
-  "print";
-
-  "proofterm", "print the current proof term",
-  "Outputs the current proof term.",
-  "proofterm";
-
   "refine", "provide a partial proof term",
   "`refine t` instantiates the focused goal by `t`, which may \
    contain underscores `_` and metavariable names `?n`; \
@@ -579,12 +553,6 @@ let tactic_completions : (string * string * string * string) list = [
    rewritten occurrences.",
   "rewrite ${1:eq}";
 
-  "search", "query the search index",
-  "Runs a query (see the query language documentation) against the \
-   index of the current file and its requirements, e.g. \
-   `search spine >= (nat → nat);`.",
-  "search ${1:query}";
-
   "set", "define a local abbreviation",
   "`set x \xe2\x89\x94 t` extends the current context with \
    `x \xe2\x89\x94 t`.",
@@ -607,10 +575,6 @@ let tactic_completions : (string * string * string * string) list = [
   "try", "try a tactic; never fails",
   "`try t` applies `t`; if `t` fails, the goal is left unchanged.",
   "try ${1:tac}";
-
-  "type", "print the type of a term",
-  "Displays the type of a term in the current context.",
-  "type ${1:term}";
 
   "why3", "dispatch to an external prover",
   "Calls an external prover through the Why3 platform to solve the \
@@ -757,10 +721,77 @@ let proof_end_completions : (string * string * string * string) list = [
   "abort;";
 ]
 
+(** Queries, valid both as commands and as tactics ([P_tac_query]):
+    offered as completions in both contexts and documented on hover.
+    Docs sourced from [doc/queries.rst]. *)
+let query_completions : (string * string * string * string) list = [
+  "assert", "check a typing or a conversion",
+  "`assert x₁ … xₙ ⊢ t : A;` checks that `t` has type `A`; \
+   `assert x₁ … xₙ ⊢ t ≡ u;` checks that `t` and `u` are \
+   convertible. Fails if the judgment does not hold.",
+  "assert \xe2\x8a\xa2 ${1:term} : ${2:type}";
+
+  "assertnot", "check that a typing or conversion fails",
+  "Like `assert`, but succeeds when the typing or conversion \
+   judgment does NOT hold.",
+  "assertnot \xe2\x8a\xa2 ${1:term} : ${2:type}";
+
+  "compute", "normalize a term",
+  "Computes the normal form of a term.",
+  "compute ${1:term}";
+
+  "debug", "toggle debug flags",
+  "Activates (`+`) or deactivates (`-`) debug modes, each named by \
+   one character, e.g. `debug +ts;`. Without argument, lists the \
+   available flags.",
+  "debug +${1:flags}";
+
+  "flag", "set an option flag on/off",
+  "Sets a flag `on` or `off`, e.g. `flag \"print_implicits\" on;`. \
+   Most flags modify printing; only `\"eta_equality\"` changes the \
+   rewrite engine. Without argument, lists the available flags.",
+  "flag \"${1:name}\" ${2:on}";
+
+  "print", "print a symbol or the goals",
+  "With a symbol identifier, displays information (type, notation, \
+   rules, …) about that symbol; with `unif_rule` or `coerce_rule`, \
+   the corresponding rules; without argument, the current goals.",
+  "print";
+
+  "proofterm", "print the current proof term",
+  "Outputs the current proof term.",
+  "proofterm";
+
+  "prover", "select the why3 prover",
+  "Changes the prover used by the `why3` tactic (default \
+   *Alt-Ergo*), e.g. `prover \"Eprover\";`.",
+  "prover \"${1:name}\"";
+
+  "prover_timeout", "set the why3 timeout",
+  "Changes the timeout (in seconds) of the `why3` tactic; initially \
+   2s.",
+  "prover_timeout ${1:seconds}";
+
+  "search", "query the search index",
+  "Runs a query (see the query language documentation) against the \
+   index of the current file and its requirements, e.g. \
+   `search spine >= (nat → nat);`.",
+  "search ${1:query}";
+
+  "type", "print the type of a term",
+  "Displays the type of a term in the current context.",
+  "type ${1:term}";
+
+  "verbose", "set the verbosity level",
+  "Takes a non-negative integer: the higher, the more details are \
+   printed. Initially 1.",
+  "verbose ${1:level}";
+]
+
 let keyword_doc (name : string) : string option =
   List.find_map
     (fun (kn, _, doc, _) -> if kn = name then Some doc else None)
-    (keyword_completions @ proof_end_completions)
+    (keyword_completions @ proof_end_completions @ query_completions)
 
 (** Hypotheses visible at the cursor inside a proof. Returns the
     focused goal's [(name, type_string)] list, or [[]] when no goal
@@ -1063,12 +1094,16 @@ let do_completion ofmt ~id params =
             ] :: acc
         ) syms [] in
       (* Tactic keywords and proof enders inside proofs; command
-         keywords and modifiers outside. *)
+         keywords and modifiers outside. Queries are valid in both
+         contexts. *)
       let keyword_items =
         if in_proof then
           mk_keyword_items "0" tactic_completions
-          @ mk_keyword_items "2" proof_end_completions
-        else mk_keyword_items "0" keyword_completions in
+          @ mk_keyword_items "2" (query_completions
+                                  @ proof_end_completions)
+        else
+          mk_keyword_items "0" keyword_completions
+          @ mk_keyword_items "2" query_completions in
       (* Hypotheses of the focused goal. *)
       let hyp_items =
         if not in_proof then [] else

@@ -288,38 +288,58 @@ class TestCompletionMidEdit(LSPTestCase):
 
 
 class TestTacticDocSync(LSPTestCase):
-    """The completion list must cover every tactic documented in the
-    manual. Extracts the ``name`` section headings from the tactic doc
-    pages and checks each is offered inside a proof — catching drift
-    when a tactic is added to the docs but not to the LSP."""
+    """The completion list must cover every tactic and query
+    documented in the manual. Extracts the ``name`` section headings
+    from the doc pages and checks each is offered — catching drift
+    when a tactic or query is added to the docs but not to the LSP."""
 
-    DOC_FILES = ("tactics.rst", "tacticals.rst", "equality.rst")
+    TACTIC_FILES = ("tactics.rst", "tacticals.rst", "equality.rst")
+    QUERY_FILES = ("queries.rst",)
 
-    @classmethod
-    def documented_tactics(cls):
-        heading = re.compile(r"^``([a-z_0-9]+)(?: <[^>]+>)?``$")
+    @staticmethod
+    def documented_names(fnames):
+        item = r"``[a-z_0-9]+(?: <[^>]+>)?``"
+        heading = re.compile(rf"^{item}(?:, {item})*$")
+        name_re = re.compile(r"``([a-z_0-9]+)")
         underline = re.compile(r"^[-~^\"'=+#*]{3,}$")
         names = set()
-        for fname in cls.DOC_FILES:
+        for fname in fnames:
             lines = (REPO_ROOT / "doc" / fname).read_text().splitlines()
             for i in range(len(lines) - 1):
-                m = heading.match(lines[i].strip())
-                if m and underline.match(lines[i + 1].strip()):
-                    names.add(m.group(1))
+                if heading.match(lines[i].strip()) \
+                        and underline.match(lines[i + 1].strip()):
+                    names.update(name_re.findall(lines[i]))
         return names
 
+    def _labels(self, uri, line):
+        r = _completion_request(self.server, uri, line, 0)
+        return {i["label"] for i in r.get("items", [])}
+
     def test_documented_tactics_are_offered(self):
-        documented = self.documented_tactics()
+        documented = self.documented_names(self.TACTIC_FILES)
         self.assertGreaterEqual(len(documented), 20,
             f"suspiciously few tactic headings extracted from "
-            f"{self.DOC_FILES}: {sorted(documented)}")
+            f"{self.TACTIC_FILES}: {sorted(documented)}")
         uri, _src, _ = self.open_text("sync.lp", TestCompletionInProof.PROOF)
-        r = _completion_request(self.server, uri, 5, 0)
-        labels = {i["label"] for i in r.get("items", [])}
-        missing = documented - labels
+        missing = documented - self._labels(uri, 5)
         self.assertFalse(missing,
             f"tactics documented in doc/*.rst but not offered as "
             f"completions: {sorted(missing)}")
+
+    def test_documented_queries_are_offered_in_both_contexts(self):
+        """Queries are commands and tactics at once; they must be
+        offered at toplevel and inside proofs."""
+        documented = self.documented_names(self.QUERY_FILES)
+        self.assertGreaterEqual(len(documented), 10,
+            f"suspiciously few query headings extracted: "
+            f"{sorted(documented)}")
+        uri, _src, _ = self.open_text("syncq.lp",
+                                      TestCompletionInProof.PROOF)
+        for line, where in ((0, "at toplevel"), (5, "inside a proof")):
+            missing = documented - self._labels(uri, line)
+            self.assertFalse(missing,
+                f"queries documented in doc/queries.rst but not "
+                f"offered {where}: {sorted(missing)}")
 
 
 if __name__ == "__main__":
