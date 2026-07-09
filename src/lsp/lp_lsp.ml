@@ -518,8 +518,11 @@ let words_and_partial (s : string) : string list * string =
     List.rev (List.filter (fun w -> w <> "") rest), partial
 
 (** Cursor context for completion, determined lexically from the
-    line before the cursor — the text being typed rarely parses, so
-    the AST cannot tell. *)
+    line before the cursor. Only the contexts the parser's follow
+    sets cannot provide remain here: those about the partial token
+    being typed (module paths, qualified names, flag names) and the
+    ranking of hypotheses in tactic arguments; keyword membership
+    itself comes from the grammar (see [follow_at]). *)
 type completion_context =
   | Ctx_require of string * int
     (** Module path of a [require]/[open]: the typed partial path
@@ -527,12 +530,7 @@ type completion_context =
   | Ctx_qualified of string * string
     (** Dotted token before the cursor: the module part (before the
         last dot) and the partial name after it. *)
-  | Ctx_notation_arg    (** After [notation <id>]. *)
-  | Ctx_assoc_side      (** After [associative] or [infix]. *)
   | Ctx_flag_name       (** Inside the string argument of [flag]. *)
-  | Ctx_switch          (** After the string argument of [flag]. *)
-  | Ctx_modifier of string list
-    (** After one or more symbol modifiers (the words so far). *)
   | Ctx_tactic_arg
     (** Argument of a tactic that names existing hypotheses. *)
   | Ctx_default
@@ -540,10 +538,12 @@ type completion_context =
 (* Tactics whose argument commonly mentions hypotheses. *)
 let arg_tactics = ["apply"; "refine"; "rewrite"; "remove"; "generalize"]
 
-(* Symbol property/exposition modifiers, preceding symbol/inductive. *)
+(* Symbol modifiers and their sides. Repeating one is grammatical,
+   so follow sets keep offering them; it is never useful, so the
+   already-typed ones are filtered from completions. *)
 let modifier_words =
-  ["constant"; "injective"; "commutative"; "associative"; "opaque";
-   "private"; "protected"; "sequential"]
+  ["left"; "right"; "associative"; "commutative"; "constant";
+   "injective"; "opaque"; "private"; "protected"; "sequential"]
 
 (* [qualified_of partial] splits the dotted token ending [partial] at
    its last dot: [Some ("Stdlib.Nat", "ze")] for ["(Stdlib.Nat.ze"].
@@ -582,26 +582,49 @@ let completion_context (doc : Lp_doc.t) line col : completion_context =
     | "private" :: ("require" | "open") :: rest
       when path_words rest ->
       Ctx_require (partial, col - cp_len partial)
-    | ["notation"; _] when quotes = 0 -> Ctx_notation_arg
     | "flag" :: _ when quotes = 1 -> Ctx_flag_name
-    | "flag" :: _ when quotes = 2 -> Ctx_switch
     | _ ->
       match qualified_of partial with
       | Some (mpath, name) -> Ctx_qualified (mpath, name)
       | None ->
-        match List.rev words with
-        (* [associative] is a modifier, handled below (its sides are
-           added there); a trailing [infix] belongs to [notation]. *)
-        | "infix" :: _ -> Ctx_assoc_side
-        | _ ->
-          if words <> []
-          && List.for_all
-               (fun w -> List.mem w modifier_words) words
-          then Ctx_modifier words
-          else
-            match words with
-            | t :: _ when List.mem t arg_tactics -> Ctx_tactic_arg
-            | _ -> Ctx_default
+        match words with
+        | t :: _ when List.mem t arg_tactics -> Ctx_tactic_arg
+        | _ -> Ctx_default
+
+(* [doc] text before the cursor at (0-based) [line],[col] counted in
+   code points, minus the partial word ending at the cursor: what the
+   parser should see to tell what may come next (the client filters
+   the items against the typed word itself). Word boundaries are the
+   delimiters of [token_at_pos]; a multi-byte code point always
+   belongs to a word. *)
+let doc_prefix (doc : Lp_doc.t) line col : string =
+  let cur =
+    match line_prefix doc line col with
+    | None -> ""
+    | Some prefix ->
+      let is_delim = function
+        | ' ' | '\t' | '\r' | '(' | ')' | '[' | ']' | '{' | '}'
+        | ';' | ',' | '"' | '.' | ':' | '@' -> true
+        | _ -> false
+      in
+      let i = ref (String.length prefix) in
+      while !i > 0 && not (is_delim prefix.[!i - 1]) do decr i done;
+      String.sub prefix 0 !i
+  in
+  let lines = String.split_on_char '\n' doc.Lp_doc.text in
+  let rec before i = function
+    | l :: ls when i < line -> l :: before (i + 1) ls
+    | _ -> []
+  in
+  String.concat "\n" (before 0 lines @ [cur])
+
+(** Tokens the grammar accepts at the cursor, from the parser: the
+    command starters between commands, the follow set of the
+    truncated command within one, and [] when the text before the
+    cursor has a syntax error (a broken edit earlier in the file) —
+    callers then fall back to context-blind items. *)
+let follow_at (doc : Lp_doc.t) line col : Parsing.LpLexer.token list =
+  Pure.expected_tokens (doc_prefix doc line col)
 
 (* Module paths under the current library mappings (the workspace
    package and every map-dir), found by scanning the mapped
@@ -863,8 +886,9 @@ let tactic_doc (name : string) : string option =
 let is_tactic_name n = tactic_doc n <> None
 
 (** Command keywords and symbol modifiers: offered as completions
-    outside proofs and documented on hover anywhere in a document.
-    Same [(name, detail, doc, snippet)] entries as
+    where the grammar accepts them (anywhere outside proofs when the
+    prefix does not parse) and documented on hover anywhere in a
+    document. Same [(name, detail, doc, snippet)] entries as
     [tactic_completions]; docs sourced from [doc/commands.rst]. *)
 let keyword_completions : (string * string * string * string) list = [
   "symbol", "declare or define a symbol",
@@ -898,12 +922,14 @@ let keyword_completions : (string * string * string * string) list = [
    modules, usable qualified (`Stdlib.Bool.true`); `require open` \
    also puts them in scope; `require … as …` gives the module an \
    alias.",
-  "require ${1:path};";
+  (* [open], [private] and module paths complete after the keyword,
+     so the snippet presumes none of the alternatives. *)
+  "require $0;";
 
   "open", "bring module symbols into scope",
   "Puts into scope the symbols of previously required modules. \
    Non-private `open`s are transitively inherited.",
-  "open ${1:path};";
+  "open $0;";
 
   "builtin", "map a builtin name to a symbol",
   "Maps an internal string literal to a user symbol, e.g. \
@@ -1061,6 +1087,9 @@ let query_completions : (string * string * string * string) list = [
   "verbose ${1:level}";
 ]
 
+(* Argument keywords (notation kinds, sides, switches, [as]) are
+   deliberately absent here: no hover docs for them, they are only
+   described in their completion items. *)
 let keyword_doc (name : string) : string option =
   List.find_map
     (fun (kn, _, doc, _) -> if kn = name then Some doc else None)
@@ -1388,6 +1417,15 @@ let switch_completions : (string * string * string * string) list = [
   "off", "disable the flag", "Turns the flag off.", "off";
 ]
 
+(* Keywords only valid as arguments of other commands, never offered
+   without grammar support. *)
+let arg_keyword_completions : (string * string * string * string) list = [
+  "as", "alias for the required module",
+  "`require M as N;` gives the module `M` the alias `N`, usable in \
+   qualified names (`N.symb`).",
+  "as ${1:alias}";
+]
+
 (* Names of the registered boolean flags, offered inside the string
    argument of [flag]. *)
 let flag_name_items () : J.t list =
@@ -1395,25 +1433,56 @@ let flag_name_items () : J.t list =
     (fun name _ acc -> `Assoc ["label", `String name] :: acc)
     Stdlib.(!Console.boolean_flags) []
 
-(* After one or more modifiers, only further modifiers and the
-   declaration keywords they qualify are valid. The declarations
-   rank first; a trailing [associative] also offers its sides. *)
-let mk_modifier_items (words : string list) : J.t list =
-  let pick names =
-    List.filter (fun (n, _, _, _) -> List.mem n names)
-      keyword_completions in
-  let heads =
-    "symbol" :: "inductive"
-    :: (if words = ["private"] then ["require"; "open"] else []) in
-  let mods =
-    List.filter (fun m -> not (List.mem m words)) modifier_words in
-  let sides =
-    match List.rev words with
-    | "associative" :: _ -> mk_keyword_items "0" assoc_side_completions
-    | _ -> []
-  in
-  sides @ mk_keyword_items "0" (pick heads)
-  @ mk_keyword_items "1" (pick mods)
+(* Names under which a follow-set token may appear in the keyword
+   tables. Tokens without a keyword rendering (identifiers, literals,
+   punctuation) map to a phrase no table entry uses, and to nothing
+   in the end. *)
+let token_names (tk : Parsing.LpLexer.token) : string list =
+  match tk with
+  | Parsing.LpLexer.ASSERT _ -> ["assert"; "assertnot"]
+  | Parsing.LpLexer.SIDE _ -> ["left"; "right"]
+  | Parsing.LpLexer.SWITCH _ -> ["on"; "off"]
+  | _ -> [Parsing.LpParser.string_of_token tk]
+
+(* The keyword tables, with the rank their items keep relative to
+   each other when offered from a follow set: queries and proof
+   enders sort after the keywords specific to the context. *)
+let follow_tables : (string * (string * string * string * string) list) list =
+  [ "0", tactic_completions;
+    "0", keyword_completions;
+    "0", notation_arg_completions;
+    "0", assoc_side_completions;
+    "0", switch_completions;
+    "0", arg_keyword_completions;
+    "2", query_completions;
+    "2", proof_end_completions ]
+
+(** Completion items for the keywords of a parser follow set: the
+    grammar decides membership, the tables provide the docs and
+    snippets. [exclude] drops named keywords (already-typed
+    modifiers). *)
+let follow_keyword_items ?(exclude : string list = [])
+    (follow : Parsing.LpLexer.token list) : J.t list =
+  let names =
+    List.filter (fun n -> not (List.mem n exclude))
+      (List.concat_map token_names follow) in
+  List.concat_map (fun (rank, table) ->
+    mk_keyword_items rank
+      (List.filter (fun (n, _, _, _) -> List.mem n names) table))
+    follow_tables
+
+(* Whether the grammar accepts a qualified identifier at a position
+   with this follow set: a symbol reference (term or identifier
+   position) or a module path (after [require]/[open]). Binder
+   positions (a fresh name after [as], [assume], [symbol], …) only
+   accept unqualified identifiers, so they don't trigger symbol
+   completion. *)
+let follow_accepts_qid (follow : Parsing.LpLexer.token list) : bool =
+  List.exists
+    (function
+      | Parsing.LpLexer.QID _ | Parsing.LpLexer.QID_EXPL _ -> true
+      | _ -> false)
+    follow
 
 let do_completion ofmt ~id params =
   let uri, line, character = get_docTextPosition params in
@@ -1438,55 +1507,76 @@ let do_completion ofmt ~id params =
       let ctx = completion_context doc line character in
       match ctx with
       | Ctx_require (partial, start_col) ->
-        reply (mk_module_path_items ~line ~start_col
-                 ~cursor_col:character partial)
+        (* Module paths, plus the keywords the grammar still accepts
+           at the cursor ([open], [private], [as], …). No paths where
+           the grammar refuses one (after [require private]); an
+           empty follow set (a partial path ending in ".") cannot
+           tell, so it offers them. *)
+        let follow = follow_at doc line character in
+        let path_items =
+          if follow = [] || follow_accepts_qid follow then
+            mk_module_path_items ~line ~start_col
+              ~cursor_col:character partial
+          else [] in
+        reply (path_items @ follow_keyword_items follow)
       | Ctx_qualified (mpath, _) ->
         reply (mk_qualified_items ss uri mpath)
-      | Ctx_notation_arg ->
-        reply (mk_keyword_items "0" notation_arg_completions)
-      | Ctx_assoc_side ->
-        reply (mk_keyword_items "0" assoc_side_completions)
-      | Ctx_switch -> reply (mk_keyword_items "0" switch_completions)
       | Ctx_flag_name -> reply (flag_name_items ())
-      | Ctx_modifier words -> reply (mk_modifier_items words)
       | (Ctx_default | Ctx_tactic_arg) when dot_triggered -> reply []
       | Ctx_default | Ctx_tactic_arg ->
-        let syms = Pure.get_symbols ss in
+        let follow = follow_at doc line character in
         let in_proof = in_proof_at doc line character in
-        (* Symbols. No [kind]: the LSP completion kinds don't match
-           lambdapi's notions, so we don't force a classification.
-           `detail` is filled in on [completionItem/resolve]; [data]
-           carries what resolve needs to find the symbol again. *)
+        (* Symbols, where the grammar accepts a symbol reference (a
+           term or identifier position). An unparseable prefix (a
+           broken edit earlier in the file) yields no follow set;
+           offer them regardless then. No [kind]: the LSP completion
+           kinds don't match lambdapi's notions, so we don't force a
+           classification. `detail` is filled in on
+           [completionItem/resolve]; [data] carries what resolve
+           needs to find the symbol again. *)
         let symbol_items =
-          Extra.StrMap.fold (fun name s acc ->
-            (* Ghost symbols (internal, e.g. for unification rules) are
-               not part of the user-facing scope. Inside a proof, tactic
-               keywords shadow symbols of the same name in the completion
-               list: the user almost certainly means the tactic. *)
-            if s.Term.sym_path = Sign.Ghost.path
-            || (in_proof && is_tactic_name name) then acc
-            else
-              `Assoc [
-                "label", `String name;
-                "data",  `Assoc [ "kind", `String "symbol"
-                                ; "uri",  `String uri ];
-              ] :: acc
-          ) syms [] in
-        (* Tactic keywords and proof enders inside proofs; command
-           keywords and modifiers outside. Queries are valid in both
-           contexts. *)
+          if follow <> [] && not (follow_accepts_qid follow) then []
+          else
+            Extra.StrMap.fold (fun name s acc ->
+              (* Ghost symbols (internal, e.g. for unification rules)
+                 are not part of the user-facing scope. Inside a proof,
+                 tactic keywords shadow symbols of the same name in the
+                 completion list: the user almost certainly means the
+                 tactic. *)
+              if s.Term.sym_path = Sign.Ghost.path
+              || (in_proof && is_tactic_name name) then acc
+              else
+                `Assoc [
+                  "label", `String name;
+                  "data",  `Assoc [ "kind", `String "symbol"
+                                  ; "uri",  `String uri ];
+                ] :: acc
+            ) (Pure.get_symbols ss) [] in
+        (* Keywords the grammar accepts at the cursor. Without a
+           follow set, fall back to context-blind tables: tactic
+           keywords and proof enders inside proofs, command keywords
+           outside, queries in both. *)
+        let typed_modifiers =
+          match line_prefix doc line character with
+          | Some p ->
+            List.filter (fun w -> List.mem w modifier_words)
+              (fst (words_and_partial p))
+          | None -> [] in
         let keyword_items =
-          match ctx with
-          (* The argument of a tactic is a term position: keywords
-             are not valid there. *)
-          | Ctx_tactic_arg -> []
-          | _ when in_proof ->
-            mk_keyword_items "0" tactic_completions
-            @ mk_keyword_items "2" (query_completions
-                                    @ proof_end_completions)
-          | _ ->
-            mk_keyword_items "0" keyword_completions
-            @ mk_keyword_items "2" query_completions in
+          match follow with
+          | _ :: _ -> follow_keyword_items ~exclude:typed_modifiers follow
+          | [] ->
+            match ctx with
+            (* The argument of a tactic is a term position: keywords
+               are not valid there. *)
+            | Ctx_tactic_arg -> []
+            | _ when in_proof ->
+              mk_keyword_items "0" tactic_completions
+              @ mk_keyword_items "2" (query_completions
+                                      @ proof_end_completions)
+            | _ ->
+              mk_keyword_items "0" keyword_completions
+              @ mk_keyword_items "2" query_completions in
         (* Hypotheses of the focused goal, ranked before the symbols
            in the argument position of a hypothesis-taking tactic. *)
         let hyp_rank =

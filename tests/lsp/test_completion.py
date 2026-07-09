@@ -265,6 +265,12 @@ class TestCompletionMidEdit(LSPTestCase):
             f"tactics must survive a mid-word edit; got {sorted(labels)[:10]}")
         self.assertIn("n", labels,
             "hypotheses must survive a mid-word edit")
+        self.assertNotIn("zero", labels,
+            "a proof step starts with a tactic, never a symbol")
+        # In a term position (the argument of the refine below the
+        # breakage), symbols checked before it must still be offered.
+        r = _completion_request(self.server, uri, 6, 9)
+        labels = {i["label"] for i in r.get("items", [])}
         self.assertIn("zero", labels,
             "symbols checked before the breakage must still be offered")
 

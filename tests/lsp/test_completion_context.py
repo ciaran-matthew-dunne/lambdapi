@@ -1,6 +1,8 @@
 """Context-aware completion: module paths, qualified names, argument
-keywords. The context is detected lexically from the line before the
-cursor, so it also works while the text does not parse."""
+keywords. Keyword membership comes from the parser's follow set at
+the cursor; the partial-token contexts (paths, qualified names, flag
+names) are detected lexically from the line before the cursor, so
+they also work while the text does not parse."""
 
 import unittest
 
@@ -319,12 +321,16 @@ class TestModifierContext(LSPTestCase):
         self.assertNotIn("Nat", by_label,
             "a modifier position does not take terms")
 
-    def test_private_offers_require_open(self):
+    def test_private_offers_open_not_require(self):
         uri, _src, _ = self.open_text("mod2.lp", "private \n")
         labels = _labels(_complete(self.server, uri, 0, 8))
-        for kw in ("symbol", "require", "open", "protected"):
+        for kw in ("symbol", "open", "protected"):
             self.assertIn(kw, labels,
                 f"{kw!r} can follow `private`")
+        # `private` comes after `require`, not before:
+        # `require private open M;` vs `private open M;`.
+        self.assertNotIn("require", labels,
+            "`private require` does not parse")
 
     def test_associative_offers_sides_and_symbol(self):
         uri, _src, _ = self.open_text("mod3.lp",
@@ -333,6 +339,107 @@ class TestModifierContext(LSPTestCase):
         for kw in ("left", "right", "symbol"):
             self.assertIn(kw, labels,
                 f"{kw!r} can follow `associative`")
+
+
+class TestGrammarFollowSets(LSPTestCase):
+    """Keyword completions come from the parser's follow sets: what
+    the grammar accepts at the cursor, nothing else."""
+
+    def test_require_offers_open_private_and_paths(self):
+        uri, _src, _ = self.open_text("fol1.lp", "require \n")
+        labels = _labels(_complete(self.server, uri, 0, 8))
+        for kw in ("open", "private"):
+            self.assertIn(kw, labels, f"{kw!r} can follow `require`")
+        self.assertIn("test.simple", labels,
+            "module paths complete after `require`")
+        self.assertNotIn("symbol", labels,
+            "`require symbol` does not parse")
+
+    def test_require_path_offers_as(self):
+        uri, _src, _ = self.open_text("fol2.lp",
+            "require test.simple \n")
+        labels = _labels(_complete(self.server, uri, 0, 20))
+        self.assertIn("as", labels,
+            "`require M as N;` aliases the module")
+        self.assertIn("test.inductive", labels,
+            "`require` takes several paths")
+        self.assertNotIn("open", labels,
+            "`open` only comes right after `require`")
+
+    def test_require_alias_position_is_quiet(self):
+        """`require M as <cursor>` wants a fresh name: no keywords,
+        no symbols."""
+        uri, _src, _ = self.open_text("fol3.lp",
+            "require test.simple as \n")
+        self.assertEqual(_labels(_complete(self.server, uri, 0, 23)),
+                         set())
+
+    def test_require_private_offers_only_open(self):
+        uri, _src, _ = self.open_text("fol4.lp", "require private \n")
+        labels = _labels(_complete(self.server, uri, 0, 16))
+        self.assertIn("open", labels)
+        self.assertNotIn("test.simple", labels,
+            "`require private` must be followed by `open`, not a path")
+
+    def test_notation_offers_kinds(self):
+        uri, _src, _ = self.open_text("fol5.lp",
+            "constant symbol Nat : TYPE;\n"
+            "notation Nat \n")
+        labels = _labels(_complete(self.server, uri, 1, 13))
+        for kw in ("infix", "prefix", "postfix", "quantifier"):
+            self.assertIn(kw, labels, f"{kw!r} can follow `notation f`")
+        self.assertNotIn("Nat", labels,
+            "a notation kind position does not take terms")
+
+    def test_infix_offers_sides(self):
+        uri, _src, _ = self.open_text("fol6.lp",
+            "constant symbol Nat : TYPE;\n"
+            "notation Nat infix \n")
+        labels = _labels(_complete(self.server, uri, 1, 19))
+        for kw in ("left", "right"):
+            self.assertIn(kw, labels, f"{kw!r} can follow `infix`")
+
+    def test_flag_string_offers_switch(self):
+        uri, _src, _ = self.open_text("fol7.lp",
+            'flag "eta_equality" \n')
+        labels = _labels(_complete(self.server, uri, 0, 20))
+        self.assertIn("on", labels)
+        self.assertIn("off", labels)
+
+    def test_simplify_offers_rule(self):
+        uri, _src, _ = self.open_text("fol8.lp",
+            "constant symbol P : TYPE;\n"
+            "constant symbol p : P;\n"
+            "symbol thm : P ≔\n"
+            "begin\n"
+            "  simplify \n"
+            "  refine p;\n"
+            "end;\n")
+        labels = _labels(_complete(self.server, uri, 4, 11))
+        self.assertIn("rule", labels,
+            "`simplify rule off` disables rewrite rules")
+        self.assertIn("p", labels,
+            "`simplify f` takes a symbol")
+        self.assertNotIn("apply", labels,
+            "a tactic cannot follow `simplify` without a separator")
+
+    def test_statement_type_offers_begin(self):
+        uri, _src, _ = self.open_text("fol9.lp",
+            "constant symbol P : TYPE;\n"
+            "symbol thm : P \n")
+        labels = _labels(_complete(self.server, uri, 1, 15))
+        self.assertIn("begin", labels,
+            "a proof can start after the statement's type")
+        self.assertIn("P", labels,
+            "the type may also continue with more term")
+        self.assertNotIn("symbol", labels,
+            "a command cannot start before the previous one ends")
+
+    def test_left_offers_associative(self):
+        uri, _src, _ = self.open_text("fol10.lp", "left \n")
+        labels = _labels(_complete(self.server, uri, 0, 5))
+        self.assertEqual(labels, {"associative"},
+            "`left` must be followed by `associative`")
 
 
 if __name__ == "__main__":
