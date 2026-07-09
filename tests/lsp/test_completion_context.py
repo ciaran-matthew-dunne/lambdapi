@@ -67,6 +67,62 @@ class TestRequirePathCompletion(LSPTestCase):
                       _labels(_complete(self.server, uri, 0, 15)))
 
 
+class TestQualifiedCompletion(LSPTestCase):
+    """After `M.` in term position, complete the non-private symbols
+    of the (required) module M, resolving `require as` aliases, plus
+    the next segments of loaded module paths."""
+
+    def test_qualified_offers_module_symbols(self):
+        uri, _src, _ = self.open_text("qual1.lp",
+            "require test.simple;\n"
+            "symbol z : test.simple.\n")
+        r = _complete(self.server, uri, 1, 23)
+        labels = _labels(r)
+        for name in ("Nat", "zero", "succ", "double"):
+            self.assertIn(name, labels,
+                f"{name!r} of test.simple should be offered; "
+                f"got {sorted(labels)[:10]}")
+
+    def test_qualified_resolve_attaches_type(self):
+        uri, _src, _ = self.open_text("qual2.lp",
+            "require test.simple;\n"
+            "symbol z : test.simple.\n")
+        r = _complete(self.server, uri, 1, 23)
+        item = next(i for i in r.get("items", [])
+                    if i["label"] == "succ")
+        resolved = self.server.resolve_completion(item)
+        self.assertIn("Nat", resolved.get("detail", ""),
+            f"resolved detail should carry the type; got {resolved!r}")
+
+    def test_alias_resolves(self):
+        uri, _src, _ = self.open_text("qual3.lp",
+            "require test.simple as S;\n"
+            "symbol z : S.\n")
+        self.assertIn("Nat", _labels(_complete(self.server, uri, 1, 13)))
+
+    def test_private_symbols_excluded(self):
+        uri, _src, _ = self.open_text("qual4.lp",
+            "require test.modifiers;\n"
+            "symbol z : test.modifiers.\n")
+        labels = _labels(_complete(self.server, uri, 1, 26))
+        self.assertIn("inj", labels)
+        self.assertNotIn("priv", labels,
+            "private symbols must not be offered outside their module")
+
+    def test_intermediate_segment_offered(self):
+        """`test.` in term position: `test` is not itself a module,
+        but loaded paths extend it — offer the next segment."""
+        uri, _src, _ = self.open_text("qual5.lp",
+            "require test.simple;\n"
+            "symbol z : test.\n")
+        r = _complete(self.server, uri, 1, 16)
+        by_label = {i["label"]: i for i in r.get("items", [])}
+        self.assertIn("simple", by_label,
+            f"next path segment should be offered; "
+            f"got {sorted(by_label)[:10]}")
+        self.assertEqual(by_label["simple"].get("kind"), 9)  # Module
+
+
 class TestDotTrigger(LSPTestCase):
     """A "."-triggered request outside the dot-aware contexts must
     return no items (e.g. after a number), while normal invocation at

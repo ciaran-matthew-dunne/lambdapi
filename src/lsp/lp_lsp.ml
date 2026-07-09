@@ -475,7 +475,25 @@ type completion_context =
   | Ctx_require of string * int
     (** Module path of a [require]/[open]: the typed partial path
         and its start column. *)
+  | Ctx_qualified of string * string
+    (** Dotted token before the cursor: the module part (before the
+        last dot) and the partial name after it. *)
   | Ctx_default
+
+(* [qualified_of partial] splits the dotted token ending [partial] at
+   its last dot: [Some ("Stdlib.Nat", "ze")] for ["(Stdlib.Nat.ze"].
+   [None] when there is no dot or nothing before it. *)
+let qualified_of (partial : string) : (string * string) option =
+  let is_delim c = String.contains "()[]{};,\":@" c in
+  let start = ref 0 in
+  String.iteri (fun i c -> if is_delim c then start := i + 1) partial;
+  let tok =
+    String.sub partial !start (String.length partial - !start) in
+  match String.rindex_opt tok '.' with
+  | Some i when i > 0 ->
+    Some (String.sub tok 0 i,
+          String.sub tok (i + 1) (String.length tok - i - 1))
+  | _ -> None
 
 let completion_context (doc : Lp_doc.t) line col : completion_context =
   match line_prefix doc line col with
@@ -494,7 +512,10 @@ let completion_context (doc : Lp_doc.t) line col : completion_context =
     match words with
     | ("require" | "open") :: rest when path_words rest ->
       Ctx_require (partial, col - cp_len partial)
-    | _ -> Ctx_default
+    | _ ->
+      match qualified_of partial with
+      | Some (mpath, name) -> Ctx_qualified (mpath, name)
+      | None -> Ctx_default
 
 (* Module paths under the current library mappings (the workspace
    package and every map-dir), found by scanning the mapped
@@ -547,6 +568,61 @@ let mk_module_path_items ~line ~start_col ~cursor_col partial
           [ "range", mk_char_range line start_col cursor_col
           ; "newText", `String mp ];
       ])
+
+(* Completion items for the qualified name [mstr].[partial]: the
+   non-private symbols of that module (resolving a [require as]
+   alias), plus the next segments of loaded module paths extending
+   it. Only loaded (i.e. required) modules can be referenced, so no
+   filesystem scan here. The client inserts after the dot, so plain
+   labels are enough. *)
+let mk_qualified_items ss uri (mstr : string) : J.t list =
+  let seg = String.split_on_char '.' mstr in
+  let path =
+    match seg with
+    | [a] ->
+      (match Extra.StrMap.find_opt a (Pure.get_aliases ss) with
+       | Some p -> p
+       | None -> seg)
+    | _ -> seg
+  in
+  let loaded = Timed.(!) Sign.loaded in
+  let sym_items =
+    match Path.Map.find_opt path loaded with
+    | None -> []
+    | Some sign ->
+      Extra.StrMap.fold (fun name (s : Term.sym) acc ->
+          if s.Term.sym_expo = Term.Privat then acc
+          else
+            `Assoc [
+              "label", `String name;
+              "data", `Assoc
+                [ "kind", `String "qualified"
+                ; "uri",  `String uri
+                ; "path", `String (String.concat "." path) ];
+            ] :: acc)
+        (Timed.(!) sign.Sign.sign_symbols) []
+  in
+  let rec list_is_prefix xs ys =
+    match xs, ys with
+    | [], _ -> true
+    | x :: xs, y :: ys -> x = y && list_is_prefix xs ys
+    | _, [] -> false
+  in
+  let n = List.length path in
+  let segments =
+    Path.Map.fold (fun p _ acc ->
+        if list_is_prefix path p then
+          match List.nth_opt p n with
+          | Some seg -> seg :: acc
+          | None -> acc
+        else acc)
+      loaded []
+  in
+  let seg_items =
+    List.map (fun seg -> `Assoc ["label", `String seg; "kind", `Int 9])
+      (List.sort_uniq Stdlib.compare segments)
+  in
+  sym_items @ seg_items
 
 (** Tactic keywords offered as completions inside a proof and
     documented on hover. Each entry is [(name, detail, doc, snippet)]:
@@ -1209,6 +1285,8 @@ let do_completion ofmt ~id params =
       | Ctx_require (partial, start_col) ->
         reply (mk_module_path_items ~line ~start_col
                  ~cursor_col:character partial)
+      | Ctx_qualified (mpath, _) ->
+        reply (mk_qualified_items ss uri mpath)
       | Ctx_default when dot_triggered -> reply []
       | Ctx_default ->
         let syms = Pure.get_symbols ss in
@@ -1268,31 +1346,47 @@ let do_completion_resolve ofmt ~id params =
   let echo () =
     LIO.send_json ofmt (LSP.mk_reply ~id ~result:(`Assoc params))
   in
+  (* Re-find the completed symbol via [find] (with the document's
+     print state installed) and send the item back with its
+     pretty-printed type as [detail]. *)
+  let resolve_with uri (find : Pure.state -> Term.sym option) =
+    match Hashtbl.find_opt completed_table uri with
+    | None -> echo ()
+    | Some doc ->
+      match doc.Lp_doc.final with
+      | None -> echo ()
+      | Some ss ->
+        Pure.set_print_state ss;
+        match find ss with
+        | None -> echo ()
+        | Some sym ->
+          let type_str =
+            Format.asprintf "%a" Core.Print.sym_type sym in
+          let fields =
+            ("detail", `String type_str) ::
+            List.remove_assoc "detail" params in
+          LIO.send_json ofmt (LSP.mk_reply ~id ~result:(`Assoc fields))
+  in
   match List.assoc_opt "data" params with
   | Some (`Assoc data) ->
+    let uri = try string_field "uri" data with _ -> "" in
+    let label = try string_field "label" params with _ -> "" in
     (match List.assoc_opt "kind" data with
      | Some (`String "symbol") ->
-       let uri = try string_field "uri" data with _ -> "" in
        (* Items are generated from the in-scope symbol map, keyed by
           the label; resolve the highlighted item from the same map. *)
-       let label = try string_field "label" params with _ -> "" in
-       (match Hashtbl.find_opt completed_table uri with
-        | None -> echo ()
-        | Some doc ->
-          match doc.Lp_doc.final with
-          | None -> echo ()
-          | Some ss ->
-            Pure.set_print_state ss;
-            (match Extra.StrMap.find_opt label (Pure.get_symbols ss) with
-             | None -> echo ()
-             | Some sym ->
-               let type_str =
-                 Format.asprintf "%a" Core.Print.sym_type sym in
-               let fields =
-                 ("detail", `String type_str) ::
-                 List.remove_assoc "detail" params in
-               LIO.send_json ofmt
-                 (LSP.mk_reply ~id ~result:(`Assoc fields))))
+       resolve_with uri (fun ss ->
+           Extra.StrMap.find_opt label (Pure.get_symbols ss))
+     | Some (`String "qualified") ->
+       let path =
+         try String.split_on_char '.' (string_field "path" data)
+         with _ -> [] in
+       resolve_with uri (fun _ss ->
+           match Path.Map.find_opt path (Timed.(!) Sign.loaded) with
+           | None -> None
+           | Some sign ->
+             Extra.StrMap.find_opt label
+               (Timed.(!) sign.Sign.sign_symbols))
      | _ -> echo ())
   | _ -> echo ()
 
