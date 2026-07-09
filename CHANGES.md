@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Tactic `#print` to print a symbol or the current goal.
 - Export to Lean.
 - Tactic `all_hyps t` calls parameterized tactic term t on all hypotheses ignoring failing calls.
-- LSP server: completion (in-scope symbols; documented tactic keywords and goal hypotheses inside proofs), documentation on hover for tactics, command keywords and modifiers, hypothesis type hovers, hierarchical document symbols, go-to-definition on `require`/`open` module paths, hover/go-to-definition fallback to in-scope symbols in unchecked regions, and an integration test suite (`make test_lsp`).
+- LSP server: completion (in-scope symbols; command keywords with snippets; inside proofs, documented tactic keywords and the local symbols introduced by `assume`), documentation on hover for tactics, command keywords and modifiers, hover on `assume`-introduced local symbols showing their types, hierarchical document symbols, go-to-definition on `require`/`open` module paths, hover/go-to-definition fallback to in-scope symbols in unchecked regions, and an integration test suite (`make test_lsp`).
 
 ### Changed
 

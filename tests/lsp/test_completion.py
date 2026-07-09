@@ -154,6 +154,16 @@ class TestSnippetSupport(LSPTestCase):
         self.assertIn("${1:", apply_item.get("insertText", ""),
             f"insertText should contain a tab-stop; got {apply_item!r}")
 
+    def test_command_keyword_snippet_at_toplevel(self):
+        uri, _src, _ = self.open_text("prf2.lp", self.PROOF)
+        r = _completion_request(self.server, uri, 0, 0)
+        sym = next(i for i in r.get("items", [])
+                   if i["label"] == "symbol")
+        self.assertEqual(sym.get("insertTextFormat"), 2,
+            f"snippet format expected; got {sym!r}")
+        self.assertIn("${1:", sym.get("insertText", ""),
+            f"insertText should contain a tab-stop; got {sym!r}")
+
 
 class TestMarkdownDocumentation(LSPTestCase):
     """When the client advertises markdown [documentationFormat],
@@ -188,6 +198,41 @@ class TestNoSnippetSupport(LSPTestCase):
         self.assertNotIn("insertText", apply_item,
             f"expected no insertText without snippetSupport; got {apply_item!r}")
         self.assertNotIn("insertTextFormat", apply_item)
+
+
+class TestCommandKeywordCompletions(LSPTestCase):
+    """Outside proofs, command keywords and modifiers are offered with
+    documentation; inside proofs the proof enders are, instead."""
+
+    def test_command_keywords_at_toplevel(self):
+        uri, _text, _src, _ = self.open_fixture("simple.lp")
+        r = _completion_request(self.server, uri, 0, 0)
+        by_label = {i["label"]: i for i in r.get("items", [])}
+        for kw in ("symbol", "inductive", "rule", "require", "opaque"):
+            self.assertIn(kw, by_label,
+                f"{kw!r} should be offered at toplevel")
+        self.assertIn("rewriting", by_label["rule"].get("documentation"),
+            "keyword items should carry their documentation")
+
+    def test_command_keywords_not_in_proof(self):
+        uri, _src, _ = self.open_text("kw.lp", TestCompletionInProof.PROOF)
+        r = _completion_request(self.server, uri, 5, 0)
+        labels = {i["label"] for i in r.get("items", [])}
+        self.assertNotIn("notation", labels)
+        self.assertNotIn("require", labels)
+
+    def test_proof_enders_in_proof_only(self):
+        uri, _src, _ = self.open_text("kw2.lp", TestCompletionInProof.PROOF)
+        r = _completion_request(self.server, uri, 5, 0)
+        by_label = {i["label"]: i for i in r.get("items", [])}
+        for kw in ("end", "admitted", "abort"):
+            self.assertIn(kw, by_label,
+                f"{kw!r} should be offered inside a proof")
+        self.assertIn("axioms", by_label["admitted"].get("documentation"))
+        r2 = _completion_request(self.server, uri, 0, 0)
+        labels2 = {i["label"] for i in r2.get("items", [])}
+        self.assertNotIn("admitted", labels2,
+            "proof enders should not be offered at toplevel")
 
 
 class TestCompletionMidEdit(LSPTestCase):

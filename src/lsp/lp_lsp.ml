@@ -627,91 +627,140 @@ let tactic_doc (name : string) : string option =
 
 let is_tactic_name n = tactic_doc n <> None
 
-(** Documentation of command keywords and symbol modifiers, shown on
-    hover (anywhere in a document, unlike tactic docs which apply
-    inside proofs). Sourced from [doc/commands.rst]. *)
-let keyword_docs : (string * string) list = [
-  "symbol",
+(** Command keywords and symbol modifiers: offered as completions
+    outside proofs and documented on hover anywhere in a document.
+    Same [(name, detail, doc, snippet)] entries as
+    [tactic_completions]; docs sourced from [doc/commands.rst]. *)
+let keyword_completions : (string * string * string * string) list = [
+  "symbol", "declare or define a symbol",
   "Declares or defines a symbol. Syntax: \
    `modifiers symbol id params [: type] [≔ [term]] [begin proof end] \
    ;`. Without `≔` it is a declaration (axiom); with `≔` a \
-   definition or theorem.";
-  "inductive",
+   definition or theorem.",
+  "symbol ${1:id} : ${2:type};";
+
+  "inductive", "define an inductive type",
   "Defines inductive types with their constructors, and generates \
    their induction principles `ind_<name>` and rules (requires the \
    `Prop` and `P` builtins). Mutually defined types are linked with \
-   `with`.";
-  "rule",
+   `with`.",
+  "inductive ${1:id} : ${2:type} \xe2\x89\x94\n| ${3:c} : $1;";
+
+  "rule", "declare a rewriting rule",
   "Declares rewriting rules for definable symbols, e.g. \
    `rule add zero $n ↪ $n;`. `$`-prefixed identifiers are pattern \
    variables. Rules should form a confluent and terminating system; \
-   chain several with `with`.";
-  "with",
+   chain several with `with`.",
+  "rule ${1:lhs} \xe2\x86\xaa ${2:rhs};";
+
+  "with", "chain rules or inductive types",
   "Chains additional rewriting rules (`rule … with …`) or links \
-   mutually defined inductive types.";
-  "require",
+   mutually defined inductive types.",
+  "with ${1:lhs} \xe2\x86\xaa ${2:rhs}";
+
+  "require", "import modules",
   "Imports the non-private symbols, rules and builtins of other \
    modules, usable qualified (`Stdlib.Bool.true`); `require open` \
    also puts them in scope; `require … as …` gives the module an \
-   alias.";
-  "open",
+   alias.",
+  "require ${1:path};";
+
+  "open", "bring module symbols into scope",
   "Puts into scope the symbols of previously required modules. \
-   Non-private `open`s are transitively inherited.";
-  "builtin",
+   Non-private `open`s are transitively inherited.",
+  "open ${1:path};";
+
+  "builtin", "map a builtin name to a symbol",
   "Maps an internal string literal to a user symbol, e.g. \
    `builtin \"P\" ≔ …;` — required by some commands, tactics and \
-   notations.";
-  "notation",
+   notations.",
+  "builtin \"${1:name}\" \xe2\x89\x94 ${2:id};";
+
+  "notation", "set a symbol's notation",
   "Sets the notation of a symbol: `infix`/`prefix`/`postfix` with an \
-   optional priority, or `quantifier`.";
-  "opaque",
+   optional priority, or `quantifier`.",
+  "notation ${1:id} infix ${2:priority};";
+
+  "opaque", "never unfold the definition",
   "The symbol is never reduced to its definition (typical for \
    theorems). As a command, `opaque x;` makes a previously defined \
-   symbol opaque.";
-  "unif_rule",
+   symbol opaque.",
+  "opaque";
+
+  "unif_rule", "declare a unification rule",
   "Declares a unification rule `t ≡ u ↪ [t₁ ≡ u₁; …]`, tried by the \
    unification engine when a problem cannot be solved by the default \
-   algorithm.";
-  "coerce_rule",
+   algorithm.",
+  "unif_rule";
+
+  "coerce_rule", "declare a coercion rule",
   "Declares a coercion rule, used to automatically insert coercions \
-   between types.";
-  "begin",
+   between types.",
+  "coerce_rule";
+
+  "begin", "start a proof script",
   "Starts a proof script solving the pending goals with tactics; \
-   close it with `end`, `admitted` or `abort`.";
-  "end",
-  "Ends a proof script once all goals are solved.";
-  "admitted",
-  "Ends a proof accepting the remaining goals as axioms.";
-  "abort",
-  "Aborts the proof: the symbol is not added to the environment.";
-  "constant",
+   close it with `end`, `admitted` or `abort`.",
+  "begin\n  $0\nend;";
+
+  "constant", "modifier: no rules or definition",
   "Property modifier: no rewriting rule or definition can ever be \
-   given to the symbol.";
-  "injective",
+   given to the symbol.",
+  "constant";
+
+  "injective", "modifier: may be considered injective",
   "Property modifier: the symbol may be considered injective, i.e. \
    if `f t₁ … tₙ ≡ f u₁ … uₙ` then `t₁ ≡ u₁`, …, `tₙ ≡ uₙ`. The \
-   verification is left to the user.";
-  "commutative",
+   verification is left to the user.",
+  "injective";
+
+  "commutative", "modifier: add commutativity",
   "Property modifier: adds the equation `f t u ≡ f u t` to the \
-   conversion.";
-  "associative",
+   conversion.",
+  "commutative";
+
+  "associative", "modifier: add associativity",
   "Property modifier: adds the equation `f (f t u) v ≡ f t (f u v)` \
    to the conversion (in conjunction with `commutative` only); \
-   `left`/`right` selects the canonical form.";
-  "private",
+   `left`/`right` selects the canonical form.",
+  "associative";
+
+  "private", "modifier: not visible outside the module",
   "Exposition modifier: the symbol cannot be used outside the module \
-   where it is defined.";
-  "protected",
+   where it is defined.",
+  "private";
+
+  "protected", "modifier: only rule LHS outside the module",
   "Exposition modifier: outside its module, the symbol can only be \
-   used in the left-hand side of rewriting rules.";
-  "sequential",
+   used in the left-hand side of rewriting rules.",
+  "protected";
+
+  "sequential", "modifier: try rules in declaration order",
   "Matching strategy modifier: apply the symbol's rules in \
    declaration order instead of the default order-independent \
-   strategy. Warning: this can break important properties.";
+   strategy. Warning: this can break important properties.",
+  "sequential";
+]
+
+(** Proof-closing keywords, offered as completions inside proofs. *)
+let proof_end_completions : (string * string * string * string) list = [
+  "end", "close a finished proof",
+  "Ends a proof script once all goals are solved.",
+  "end;";
+
+  "admitted", "accept the remaining goals as axioms",
+  "Ends a proof accepting the remaining goals as axioms.",
+  "admitted;";
+
+  "abort", "abort the proof",
+  "Aborts the proof: the symbol is not added to the environment.",
+  "abort;";
 ]
 
 let keyword_doc (name : string) : string option =
-  List.assoc_opt name keyword_docs
+  List.find_map
+    (fun (kn, _, doc, _) -> if kn = name then Some doc else None)
+    (keyword_completions @ proof_end_completions)
 
 (** Hypotheses visible at the cursor inside a proof. Returns the
     focused goal's [(name, type_string)] list, or [[]] when no goal
@@ -953,6 +1002,35 @@ let hover_symInfo ofmt ~id params =
 
 (* --- Completion ------------------------------------------------------- *)
 
+(** Completion items for a keyword table ([tactic_completions],
+    [keyword_completions], [proof_end_completions]): docs as markdown
+    and snippet insertions when the client supports them.
+    [sort_prefix] orders keyword groups relative to each other and to
+    the hypotheses group ("1"). *)
+let mk_keyword_items (sort_prefix : string)
+    (entries : (string * string * string * string) list) : J.t list =
+  List.map (fun (name, detail, doc, snippet) ->
+    let doc_field =
+      if !markdown_completion_docs then
+        `Assoc [ "kind", `String "markdown"
+               ; "value", `String doc ]
+      else `String doc
+    in
+    let base = [
+      "label", `String name;
+      "kind",  `Int 14;                 (* Keyword *)
+      "detail", `String detail;
+      "documentation", doc_field;
+      "sortText", `String (sort_prefix ^ name);
+    ] in
+    `Assoc (
+      if !snippet_support then
+        base @
+        [ "insertText", `String snippet
+        ; "insertTextFormat", `Int 2 ]  (* Snippet *)
+      else base)
+  ) entries
+
 let do_completion ofmt ~id params =
   let uri, line, character = get_docTextPosition params in
   let empty = `Assoc ["isIncomplete", `Bool false; "items", `List []] in
@@ -984,30 +1062,13 @@ let do_completion ofmt ~id params =
                               ; "uri",  `String uri ];
             ] :: acc
         ) syms [] in
-      (* Tactic keywords, with snippet insertions when supported. *)
-      let tactic_items =
-        if not in_proof then [] else
-          List.map (fun (name, detail, doc, snippet) ->
-            let doc_field =
-              if !markdown_completion_docs then
-                `Assoc [ "kind", `String "markdown"
-                       ; "value", `String doc ]
-              else `String doc
-            in
-            let base = [
-              "label", `String name;
-              "kind",  `Int 14;                 (* Keyword *)
-              "detail", `String detail;
-              "documentation", doc_field;
-              "sortText", `String ("0" ^ name);
-            ] in
-            `Assoc (
-              if !snippet_support then
-                base @
-                [ "insertText", `String snippet
-                ; "insertTextFormat", `Int 2 ]  (* Snippet *)
-              else base)
-          ) tactic_completions in
+      (* Tactic keywords and proof enders inside proofs; command
+         keywords and modifiers outside. *)
+      let keyword_items =
+        if in_proof then
+          mk_keyword_items "0" tactic_completions
+          @ mk_keyword_items "2" proof_end_completions
+        else mk_keyword_items "0" keyword_completions in
       (* Hypotheses of the focused goal. *)
       let hyp_items =
         if not in_proof then [] else
@@ -1021,7 +1082,7 @@ let do_completion ofmt ~id params =
           ) (hyps_at_cursor doc line character) in
       let result = `Assoc [
         "isIncomplete", `Bool false;
-        "items", `List (symbol_items @ tactic_items @ hyp_items);
+        "items", `List (symbol_items @ keyword_items @ hyp_items);
       ] in
       LIO.send_json ofmt (LSP.mk_reply ~id ~result)
 
