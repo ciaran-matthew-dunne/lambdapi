@@ -12,112 +12,119 @@ let log = log.pp
 
 (* token management *)
 
-let string_of_token = function
+let tokens = function
+  | [] -> ""
+  | s::l -> List.fold_left (fun acc s -> acc^", "^String.add_quotes s) s l
+
+let string_of_token =
+  let q = String.add_quotes in
+  let (||) a b = a^", "^b in
+  function
   | EOF -> "end of file"
-  | ABORT -> "abort"
-  | ADMIT -> "admit"
-  | ADMITTED -> "admitted"
-  | ALL_HYPS -> "all_hyps"
-  | APPLY -> "apply"
-  | ARROW -> "→"
-  | AS -> "as"
-  | ASSERT _ -> "assert or assertnot"
-  | ASSIGN -> "≔"
-  | ASSOCIATIVE -> "associative"
-  | ASSUME -> "assume"
-  | ASSUMPTION -> "assumption"
-  | BACKQUOTE -> "`"
-  | BEGIN -> "begin"
-  | BUILTIN -> "builtin"
-  | CHANGE -> "change"
-  | COERCE_RULE -> "coerce_rule"
-  | COLON -> ":"
-  | COMMA -> ","
-  | COMMUTATIVE -> "commutative"
-  | COMPUTE -> "compute"
-  | CONSTANT -> "constant"
-  | DEBUG -> "debug"
+  | ABORT -> q"abort"
+  | ADMIT -> q"admit"
+  | ADMITTED -> q"admitted"
+  | ALL_HYPS -> q"all_hyps"
+  | APPLY -> q"apply"
+  | ARROW -> q"→"
+  | AS -> q"as"
+  | ASSERT _ -> q"assert" || q"assertnot"
+  | ASSIGN -> q"≔"
+  | ASSOCIATIVE -> q"associative"
+  | ASSUME -> q"assume"
+  | ASSUMPTION -> q"assumption"
+  | BACKQUOTE -> q"`"
+  | BEGIN -> q"begin"
+  | BUILTIN -> q"builtin"
+  | CHANGE -> q"change"
+  | COERCE_RULE -> q"coerce_rule"
+  | COLON -> q":"
+  | COMMA -> q","
+  | COMMUTATIVE -> q"commutative"
+  | COMPUTE -> q"compute"
+  | CONSTANT -> q"constant"
+  | DEBUG -> q"debug"
   | DEBUG_FLAGS _ -> "debug flags"
-  | DOT -> "."
-  | END -> "end"
-  | EQUIV -> "≡"
-  | EVAL -> "eval"
-  | EXISTS -> "exists" (* only in Rocq *)
-  | FAIL -> "fail"
-  | FIRST_HYP -> "first_hyp"
-  | FLAG -> "flag"
-  | FLOAT _ -> "float"
-  | FOCUS -> "focus"
-  | FORALL -> "forall" (* only in Rocq *)
-  | FUN -> "fun"       (* only in Rocq *)
-  | GENERALIZE -> "generalize"
-  | HAVE -> "have"
-  | HOOK_ARROW -> "↪"
-  | IN -> "in"
-  | INDUCTION -> "induction"
-  | INDUCTIVE -> "inductive"
-  | INFIX -> "infix"
-  | INJECTIVE -> "injective"
-  | INT _ -> "integer"
-  | LAMBDA -> "λ"
-  | LET -> "let"
-  | L_CU_BRACKET -> "{"
-  | L_PAREN -> "("
-  | L_SQ_BRACKET -> "["
-  | NOTATION -> "notation"
-  | OPAQUE -> "opaque"
-  | OPEN -> "open"
-  | ORELSE -> "orelse"
-  | PI -> "Π"
-  | POSTFIX -> "postfix"
-  | PREFIX -> "prefix"
-  | PRINT -> "print"
-  | PRIVATE -> "private"
-  | PROOFTERM -> "proofterm"
-  | PROTECTED -> "protected"
-  | PROVER -> "prover"
-  | PROVER_TIMEOUT -> "prover_timeout"
+  | DOT -> q"."
+  | END -> q"end"
+  | EQUIV -> q"≡"
+  | EVAL -> q"eval"
+  | EXISTS -> q"exists" (* only in Rocq *)
+  | FAIL -> q"fail"
+  | FIRST_HYP -> q"first_hyp"
+  | FLAG -> q"flag"
+  | FLOAT _ -> q"float"
+  | FOCUS -> q"focus"
+  | FORALL -> q"forall" (* only in Rocq *)
+  | FUN -> q"fun"       (* only in Rocq *)
+  | GENERALIZE -> q"generalize"
+  | HAVE -> q"have"
+  | HOOK_ARROW -> q"↪"
+  | IN -> q"in"
+  | INDUCTION -> q"induction"
+  | INDUCTIVE -> q"inductive"
+  | INFIX -> q"infix"
+  | INJECTIVE -> q"injective"
+  | INT _ -> q"integer"
+  | LAMBDA -> q"λ"
+  | LET -> q"let"
+  | L_CU_BRACKET -> q"{"
+  | L_PAREN -> q"("
+  | L_SQ_BRACKET -> q"["
+  | NOTATION -> q"notation"
+  | OPAQUE -> q"opaque"
+  | OPEN -> q"open"
+  | ORELSE -> q"orelse"
+  | PI -> q"Π"
+  | POSTFIX -> q"postfix"
+  | PREFIX -> q"prefix"
+  | PRINT -> q"print"
+  | PRIVATE -> q"private"
+  | PROOFTERM -> q"proofterm"
+  | PROTECTED -> q"protected"
+  | PROVER -> q"prover"
+  | PROVER_TIMEOUT -> q"prover_timeout"
   | QID _ -> "qualified identifier"
   | QID_EXPL _ -> "@-prefixed qualified identifier"
   | QINT _ -> "qualified integer"
-  | QUANTIFIER -> "quantifier"
-  | REFINE -> "refine"
-  | REFLEXIVITY -> "reflexivity"
-  | REMOVE -> "remove"
-  | REPEAT -> "repeat"
-  | REQUIRE -> "require"
-  | REWRITE -> "rewrite"
-  | RULE -> "rule"
-  | R_CU_BRACKET -> "}"
-  | R_PAREN -> ")"
-  | R_SQ_BRACKET -> "]"
-  | SEARCH -> "search"
-  | SEQUENTIAL -> "sequential"
-  | SEMICOLON -> ";"
-  | SET -> "set"
-  | SIDE _ -> "left or right"
-  | SIMPLIFY -> "simplify"
-  | SOLVE -> "solve"
+  | QUANTIFIER -> q"quantifier"
+  | REFINE -> q"refine"
+  | REFLEXIVITY -> q"reflexivity"
+  | REMOVE -> q"remove"
+  | REPEAT -> q"repeat"
+  | REQUIRE -> q"require"
+  | REWRITE -> q"rewrite"
+  | RULE -> q"rule"
+  | R_CU_BRACKET -> q"}"
+  | R_PAREN -> q")"
+  | R_SQ_BRACKET -> q"]"
+  | SEARCH -> q"search"
+  | SEQUENTIAL -> q"sequential"
+  | SEMICOLON -> q";"
+  | SET -> q"set"
+  | SIDE _ -> q"left" || q"right"
+  | SIMPLIFY -> q"simplify"
+  | SOLVE -> q"solve"
   | STRINGLIT _ -> "string literal"
-  | SWITCH false -> "off"
-  | SWITCH true -> "on or off"
-  | SYMBOL -> "symbol"
-  | SYMMETRY -> "symmetry"
-  | THICKARROW -> "=>" (* only in Rocq *)
-  | TRY -> "try"
-  | TURNSTILE -> "⊢"
-  | TYPE_QUERY -> "type"
-  | TYPE_TERM -> "TYPE"
+  | SWITCH false -> q"off"
+  | SWITCH true -> q"on" || q"off"
+  | SYMBOL -> q"symbol"
+  | SYMMETRY -> q"symmetry"
+  | THICKARROW -> q"=>" (* only in Rocq *)
+  | TRY -> q"try"
+  | TURNSTILE -> q"⊢"
+  | TYPE_QUERY -> q"type"
+  | TYPE_TERM -> q"TYPE"
   | UID _ -> "non-qualified identifier"
   | UID_EXPL _ -> "@-prefixed non-qualified identifier"
   | UID_META _ -> "?-prefixed metavariable number"
   | UID_PATT _ -> "$-prefixed non-qualified identifier"
-  | UNDERSCORE -> "_"
-  | UNIF_RULE -> "unif_rule"
-  | VBAR -> "|"
-  | VERBOSE -> "verbose"
-  | WHY3 -> "why3"
-  | WITH -> "with"
+  | UNDERSCORE -> q"_"
+  | UNIF_RULE -> q"unif_rule"
+  | VBAR -> q"|"
+  | VERBOSE -> q"verbose"
+  | WHY3 -> q"why3"
+  | WITH -> q"with"
 
 let pp_token ppf t = Base.string ppf (string_of_token t)
 
@@ -360,7 +367,6 @@ let qid_expl (lb:'token lexbuf): (string list * string) loc =
   | _ ->
       expected lb "" [UID_EXPL"";QID_EXPL[]]
 
-let uid_tks = [UID""]
 let uid (lb:'token lexbuf): string loc =
   if log_enabled() then log "%s" __FUNCTION__;
   match current_token lb with
@@ -369,7 +375,19 @@ let uid (lb:'token lexbuf): string loc =
       consume_token lb;
       make_pos pos1 s
   | _ ->
-      expected lb "" uid_tks
+      expected lb "" [UID""]
+
+let sym_name (lb:'token lexbuf): string loc =
+  if log_enabled() then log "%s" __FUNCTION__;
+  match current_token lb with
+  | INT s ->
+      syntax_error (current_pos lb) "Forbidden symbol name."
+  | UID s ->
+      let pos1 = current_pos lb in
+      consume_token lb;
+      make_pos pos1 s
+  | _ ->
+      expected lb "" [UID""]
 
 let param_tks = [UID"";UNDERSCORE]
 let param (lb:'token lexbuf): string loc option =
@@ -402,7 +420,7 @@ let float_or_int (lb:'token lexbuf): string =
       consume_token lb;
       s
   | _ ->
-      expected lb "" [INT"";FLOAT""]
+      expected lb "" [FLOAT"";INT""]
 
 let path_tks = [QID[]]
 let path (lb:'token lexbuf): string list loc =
@@ -488,7 +506,7 @@ let rec symbol (p_sym_mod:p_modifier list) (lb:'token lexbuf): p_command_aux =
  if log_enabled() then log "%s" __FUNCTION__;
  let p_sym_kw = Some(locate (current_pos lb)) in
  consume SYMBOL lb;
- let p_sym_nam = uid lb in
+ let p_sym_nam = sym_name lb in
  let p_sym_arg = list params_tks params lb in
  begin
    match current_token lb with
@@ -1143,7 +1161,7 @@ and tactic (lb:'token lexbuf): p_tactic =
   | REMOVE ->
       let pos1 = current_pos lb in
       consume_token lb;
-      let xs = nelist uid_tks uid lb in
+      let xs = nelist [UID""] uid lb in
       extend_pos lb (*__FUNCTION__*) pos1 (P_tac_remove xs)
   | REPEAT ->
       let pos1 = current_pos lb in
@@ -1541,7 +1559,7 @@ and aterm (lb:'token lexbuf): p_term =
         consume_token lb;
         make_pos pos1 (P_SLit s)
     | _ ->
-      expected lb "TYPE, identifier, integer or string literal, \"_\", \
+      expected lb "TYPE, identifier, integer or string literal, \"_\" \
                    or term between parentheses or square brackets" []
 
 and env (lb:'token lexbuf): p_term list =
@@ -1642,7 +1660,7 @@ and relation (lb:'token lexbuf): relation option =
   | UID "=" -> consume_token lb; Some Exact
   | UID ">" -> consume_token lb; Some Inside
   | UID ("≥"|">=") -> consume_token lb; None
-  | _ -> expected lb "\">\", \"=\", \"≥\",\">=\"" []
+  | _ -> expected lb (tokens[">";"=";"≥";">="]) []
 
 and where (lb:'token lexbuf): bool * relation option =
   if log_enabled() then log "%s" __FUNCTION__;
@@ -1666,7 +1684,7 @@ and asearch (lb:'token lexbuf): search =
             let g = generalize lb in
             let t = term lb in
             QBase(QSearch(t,g,Some(QType None)))
-        | _ -> expected lb "\"≥\",\">=\"" []
+        | _ -> expected lb (tokens["≥";">="]) []
       end
   | UID "anywhere" ->
       begin
@@ -1677,7 +1695,7 @@ and asearch (lb:'token lexbuf): search =
             let g = generalize lb in
             let t = term lb in
             QBase(QSearch(t,g,None))
-        | _ -> expected lb "\"≥\",\">=\"" []
+        | _ -> expected lb (tokens["≥";">="]) []
       end
   | RULE ->
       consume_token lb;
@@ -1721,7 +1739,8 @@ and asearch (lb:'token lexbuf): search =
       consume R_PAREN lb;
       q
   | _ ->
-      expected lb "name, anywhere, rule, lhs, rhs, type, concl, hyp, spine" []
+    expected lb (tokens["name";"anywhere";"rule";"lhs";"rhs";"type";"concl";
+                        "hyp";"spine"]) []
 
 and csearch (lb:'token lexbuf): search =
   if log_enabled() then log "%s" __FUNCTION__;
